@@ -13,6 +13,26 @@ import { PortalService } from './portal.service';
 export class PortalController {
   constructor(private readonly portal: PortalService) {}
 
+  @Get('summary')
+  @ApiOperation({ summary: 'Counts for the portal navigation' })
+  summary(@CurrentUser() user: AuthUser) {
+    return this.portal.summaryCounts(user);
+  }
+
+  @Get('discussions')
+  @ApiOperation({
+    summary: 'My Discussions: leads shared with the signed-in customer (active first)',
+  })
+  discussions(@CurrentUser() user: AuthUser) {
+    return this.portal.discussions(user);
+  }
+
+  @Get('discussions/:id')
+  @ApiOperation({ summary: 'One shared discussion (404 if not shared with this customer)' })
+  discussion(@Param('id', ParseObjectIdPipe) id: string, @CurrentUser() user: AuthUser) {
+    return this.portal.discussion(id, user);
+  }
+
   @Get('projects')
   @ApiOperation({ summary: "The signed-in customer's projects" })
   list(@CurrentUser() user: AuthUser) {

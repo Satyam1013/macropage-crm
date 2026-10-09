@@ -46,6 +46,7 @@ export class Lead extends BaseEntity {
   @Prop({ type: Date, default: null })
   wonAt?: Date | null;
 
+  /** Set on conversion, or earlier by an admin to share the lead in the customer's portal. */
   @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Customer', default: null })
   customerId?: Types.ObjectId | null;
 
@@ -59,6 +60,14 @@ export class Lead extends BaseEntity {
   @Prop({ type: Date, default: () => new Date() })
   stageUpdatedAt: Date;
 
+  /** Shown under "My Discussions" in the linked customer's portal (requires customerId). */
+  @Prop({ default: false })
+  visibleToClient: boolean;
+
+  /** Include `value` in the customer's discussion view. */
+  @Prop({ default: false })
+  showValueToClient: boolean;
+
   @Prop({ type: [StageHistoryEntrySchema], default: [] })
   stageHistory: StageHistoryEntry<LeadStage>[];
 }
@@ -69,6 +78,7 @@ LeadSchema.index({ stage: 1, createdAt: -1 });
 LeadSchema.index({ ownerId: 1, createdAt: -1 });
 LeadSchema.index({ createdAt: -1 });
 LeadSchema.index({ projectId: 1 }, { unique: true, sparse: true });
+LeadSchema.index({ customerId: 1, visibleToClient: 1, stage: 1 });
 LeadSchema.index(
   { title: 'text', company: 'text', contactName: 'text' },
   { name: 'lead_text_search', weights: { title: 3, company: 2, contactName: 1 } },

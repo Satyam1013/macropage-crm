@@ -222,6 +222,9 @@ async function main(): Promise<void> {
       owner: Types.ObjectId;
       age: number;
       expectedClose: number | null;
+      /** Shared with this customer under "My Discussions" in the portal. */
+      client?: typeof demoRetail;
+      showValue?: boolean;
     }[] = [
       {
         title: 'Clinic appointment app',
@@ -257,9 +260,10 @@ async function main(): Promise<void> {
         expectedClose: 50,
       },
       {
-        title: 'Restaurant POS integration',
-        company: 'Spice Route Foods',
-        contactName: 'Kavya Reddy',
+        title: 'Mobile POS for retail stores',
+        company: demoRetail.name,
+        contactName: demoRetail.contactName,
+        client: demoRetail,
         source: 'Cold Call',
         value: 150000,
         stage: 'QUALIFIED',
@@ -290,9 +294,11 @@ async function main(): Promise<void> {
         expectedClose: 25,
       },
       {
-        title: 'Patient records migration',
-        company: 'LifeLine Diagnostics',
-        contactName: 'Dr. Ritu Malhotra',
+        title: 'Customer analytics dashboard',
+        company: demoRetail.name,
+        contactName: demoRetail.contactName,
+        client: demoRetail,
+        showValue: true,
         source: 'Referral',
         value: 640000,
         stage: 'PROPOSAL',
@@ -301,9 +307,10 @@ async function main(): Promise<void> {
         expectedClose: 20,
       },
       {
-        title: 'Event ticketing platform',
-        company: 'StageDoor Events',
-        contactName: 'Farhan Ali',
+        title: 'Guest mobile app & digital check-in',
+        company: seaside.name,
+        contactName: seaside.contactName,
+        client: seaside,
         source: 'LinkedIn',
         value: 470000,
         stage: 'NEGOTIATION',
@@ -354,7 +361,9 @@ async function main(): Promise<void> {
           company: l.company,
           contactName: l.contactName,
           phone: `+91 97000 300${String(i + 10)}`,
-          email: `${l.contactName.split(' ').slice(-1)[0].toLowerCase()}@${l.company.split(' ')[0].toLowerCase()}.example`,
+          email:
+            l.client?.email ??
+            `${l.contactName.split(' ').slice(-1)[0].toLowerCase()}@${l.company.split(' ')[0].toLowerCase()}.example`,
           source: l.source,
           value: l.value,
           stage: l.stage,
@@ -367,6 +376,9 @@ async function main(): Promise<void> {
           stageHistory: hist,
           stageUpdatedAt: hist[hist.length - 1].at,
           createdAt: daysAgo(l.age),
+          customerId: l.client?._id ?? null,
+          visibleToClient: !!l.client,
+          showValueToClient: !!l.showValue,
         };
       }),
     );
@@ -691,8 +703,8 @@ async function main(): Promise<void> {
   Payments: ${paymentCount}   Expenses: ${expenseCount}
 
   Admin     admin@macropage.in / admin123   (role ADMIN)
-  Customer  client@demo.com    / client123  (Demo Retail Pvt. Ltd. — 2 projects)
-  Customer  hotel@demo.com     / client123  (Seaside Hotels & Resorts — awaiting approval)
+  Customer  client@demo.com    / client123  (Demo Retail Pvt. Ltd. — 2 projects, 2 discussions)
+  Customer  hotel@demo.com     / client123  (Seaside Hotels & Resorts — awaiting approval, 1 discussion)
 `);
   } finally {
     await app.close();
