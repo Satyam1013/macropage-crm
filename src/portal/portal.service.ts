@@ -1,16 +1,19 @@
 import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
+import type { FilterQuery } from 'mongoose';
 import { PaymentMode, PROJECT_STAGES, ProjectStage } from '../common/constants/enums';
 import type { AuthUser } from '../common/decorators/current-user.decorator';
 import type { SoftDeleteModel } from '../common/plugins/soft-delete.plugin';
 import { toDateOnly, toIso } from '../common/utils/date.util';
 import { round2 } from '../common/utils/money.util';
 import { idOf, toObjectId } from '../common/utils/object-id.util';
+import { Lead } from '../leads/schemas/lead.schema';
 import { Payment } from '../payments/schemas/payment.schema';
 import { computeProgress, DevTracks } from '../projects/project-progress';
 import { toDev } from '../projects/project.mapper';
 import { ProjectsService } from '../projects/projects.service';
 import { Project } from '../projects/schemas/project.schema';
+import { DiscussionResponse, toDiscussionResponse } from './discussion.mapper';
 
 /**
  * Customer-facing projections. Deliberately excludes expenses, profit/margin, staff cost and
@@ -59,6 +62,7 @@ export class PortalService {
   constructor(
     @InjectModel(Project.name) private readonly projectModel: SoftDeleteModel<Project>,
     @InjectModel(Payment.name) private readonly paymentModel: SoftDeleteModel<Payment>,
+    @InjectModel(Lead.name) private readonly leadModel: SoftDeleteModel<Lead>,
     private readonly projects: ProjectsService,
   ) {}
 
@@ -147,6 +151,54 @@ export class PortalService {
   async requestChanges(id: string, note: string, user: AuthUser): Promise<PortalProjectDetail> {
     await this.projects.requestChanges(id, note, user, this.customerIdOf(user));
     return this.get(id, user);
+  }
+
+  /**
+   * Leads the caller may see under "My Discussions": linked to their customer, shared by an
+   * admin, not converted. CANCELLED leads are included and shown as CLOSED.
+   */
+  private discussionFilter(customerId: string): FilterQuery<Lead> {
+    return { customerId, visibleToClient: true, projectId: null, stage: { $ne: 'WON' } };
+  }
+
+  /** Only the fields the mapper reads are loaded from the database. */
+  private static readonly DISCUSSION_FIELDS =
+    'title stage value showValueToClient stageHistory createdAt';
+
+  async discussions(user: AuthUser): Promise<DiscussionResponse[]> {
+    const leads = await this.leadModel
+      .find(this.discussionFilter(this.customerIdOf(user)))
+      .select(PortalService.DISCUSSION_FIELDS)
+      .lean();
+    const time = (d: DiscussionResponse) => (d.lastUpdatedAt ? Date.parse(d.lastUpdatedAt) : 0);
+    return leads
+      .map(toDiscussionResponse)
+      .sort((a, b) =>
+        a.status !== b.status ? (a.status === 'ACTIVE' ? -1 : 1) : time(b) - time(a),
+      );
+  }
+
+  async discussion(id: string, user: AuthUser): Promise<DiscussionResponse> {
+    // Same filter as the list: other customers' / hidden / converted leads are a plain 404.
+    const lead = await this.leadModel
+      .findOne({ _id: id, ...this.discussionFilter(this.customerIdOf(user)) })
+      .select(PortalService.DISCUSSION_FIELDS)
+      .lean();
+    if (!lead) throw new NotFoundException('Discussion not found');
+    return toDiscussionResponse(lead);
+  }
+
+  /** Counts for the portal navigation. */
+  async summaryCounts(user: AuthUser): Promise<{ projects: number; activeDiscussions: number }> {
+    const customerId = this.customerIdOf(user);
+    const [projects, activeDiscussions] = await Promise.all([
+      this.projectModel.countDocuments({ customerId }),
+      this.leadModel.countDocuments({
+        ...this.discussionFilter(customerId),
+        stage: { $nin: ['WON', 'CANCELLED'] },
+      }),
+    ]);
+    return { projects, activeDiscussions };
   }
 
   private summary(p: Project, paidRaw: number, clientName: string | null): PortalProjectSummary {

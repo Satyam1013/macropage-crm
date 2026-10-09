@@ -1,10 +1,12 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { AuthUser, CurrentUser } from '../common/decorators/current-user.decorator';
+import { Roles } from '../common/decorators/roles.decorator';
 import { ParseObjectIdPipe } from '../common/pipes/parse-object-id.pipe';
 import {
   ConvertLeadDto,
   CreateLeadDto,
+  LeadClientAccessDto,
   ListLeadsQueryDto,
   UpdateLeadDto,
   UpdateLeadStageDto,
@@ -39,8 +41,25 @@ export class LeadsController {
   }
 
   @Patch(':id')
-  update(@Param('id', ParseObjectIdPipe) id: string, @Body() dto: UpdateLeadDto) {
-    return this.leads.update(id, dto);
+  update(
+    @Param('id', ParseObjectIdPipe) id: string,
+    @Body() dto: UpdateLeadDto,
+    @CurrentUser() user: AuthUser,
+  ) {
+    return this.leads.update(id, dto, user);
+  }
+
+  @Patch(':id/client-access')
+  @Roles('ADMIN')
+  @ApiOperation({
+    summary: 'Link the lead to a customer account and set its client-portal visibility',
+  })
+  setClientAccess(
+    @Param('id', ParseObjectIdPipe) id: string,
+    @Body() dto: LeadClientAccessDto,
+    @CurrentUser() user: AuthUser,
+  ) {
+    return this.leads.setClientAccess(id, dto, user);
   }
 
   @Delete(':id')

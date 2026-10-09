@@ -144,6 +144,30 @@ describe('Leads: stage rules & Deal Won → Project conversion', () => {
         .expect(404);
     });
 
+    it('partial PATCH keeps fields that were not sent (incl. aliased owner)', async () => {
+      const lead = await createLead();
+      const res = await ctx
+        .http()
+        .patch(`/api/leads/${lead.id}`)
+        .set(admin)
+        .send({ notes: 'Budget confirmed', value: 120000 })
+        .expect(200);
+      expect(res.body).toMatchObject({
+        notes: 'Budget confirmed',
+        value: 120000,
+        owner: fx.staffMemberId,
+        title: 'CRM build',
+        expectedClose: '2026-12-31',
+      });
+      const moved = await ctx
+        .http()
+        .patch(`/api/leads/${lead.id}`)
+        .set(admin)
+        .send({ owner: fx.engineerId })
+        .expect(200);
+      expect(moved.body.owner).toBe(fx.engineerId);
+    });
+
     it('soft-deletes unconverted leads', async () => {
       const lead = await createLead();
       await ctx.http().delete(`/api/leads/${lead.id}`).set(admin).expect(200);

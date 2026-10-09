@@ -9,10 +9,32 @@ import type { EnvironmentVariables } from './config/env.validation';
 
 export const API_PREFIX = 'api';
 
+/**
+ * Comma-separated origins → exact origins. Paths and trailing slashes are dropped, since the
+ * browser's Origin header never has them (`https://app.vercel.app/login` → `https://app.vercel.app`).
+ */
+export function parseOrigins(value: string): string[] {
+  return value
+    .split(',')
+    .map((o) => o.trim())
+    .filter(Boolean)
+    .map((o) => {
+      try {
+        return new URL(o).origin;
+      } catch {
+        return o.replace(/\/+$/, '');
+      }
+    });
+}
+
 /** Shared by main.ts and the e2e tests so both run the exact same pipeline. */
 export function configureApp(app: INestApplication): void {
   const config = app.get<ConfigService<EnvironmentVariables, true>>(ConfigService);
   const isProduction = config.get('NODE_ENV', { infer: true }) === 'production';
+
+  // Behind a proxy, req.ip must come from X-Forwarded-For or all clients share one rate limit.
+  const trustProxy = config.get('TRUST_PROXY', { infer: true }) ?? (isProduction ? 1 : 0);
+  if (trustProxy > 0) app.getHttpAdapter().getInstance().set('trust proxy', trustProxy);
 
   app.setGlobalPrefix(API_PREFIX);
   // Strict helmet defaults for the API; Swagger UI needs inline scripts/styles on its own route.
@@ -32,11 +54,7 @@ export function configureApp(app: INestApplication): void {
     (req.path.startsWith(docsPath) ? docsHelmet : apiHelmet)(req, res, next),
   );
   app.enableCors({
-    origin: config
-      .get('CORS_ORIGIN', { infer: true })
-      .split(',')
-      .map((o) => o.trim())
-      .filter(Boolean),
+    origin: parseOrigins(config.get('CORS_ORIGIN', { infer: true })),
     credentials: true,
     methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
   });

@@ -22,7 +22,13 @@ import { ProjectResponse, toProjectResponse } from '../projects/project.mapper';
 import { Project, ProjectDocument } from '../projects/schemas/project.schema';
 import { StaffService } from '../staff/staff.service';
 import { UsersService } from '../users/users.service';
-import { ConvertLeadDto, CreateLeadDto, ListLeadsQueryDto, UpdateLeadDto } from './dto/lead.dto';
+import {
+  ConvertLeadDto,
+  CreateLeadDto,
+  LeadClientAccessDto,
+  ListLeadsQueryDto,
+  UpdateLeadDto,
+} from './dto/lead.dto';
 import {
   LeadDetailResponse,
   LeadResponse,
@@ -91,18 +97,21 @@ export class LeadsService {
       throw new BadRequestException('A lead cannot be created as WON; use POST /leads/:id/convert');
     }
     await this.staff.assertExist([dto.ownerId], undefined, 'ownerId');
+    const access = await this.resolveClientAccess(null, dto);
     const now = new Date();
     const lead = await this.leadModel.create({
       ...dto,
+      ...access,
       stage,
       expectedClose: dto.expectedClose ? parseDateOnly(dto.expectedClose) : null,
       stageUpdatedAt: now,
       stageHistory: [{ from: null, to: stage, by: actor.id, at: now }],
     });
+    if (access.customerId) this.logAccess(lead.id as string, access, actor);
     return this.get(lead.id as string);
   }
 
-  async update(id: string, dto: UpdateLeadDto): Promise<LeadDetailResponse> {
+  async update(id: string, dto: UpdateLeadDto, actor: AuthUser): Promise<LeadDetailResponse> {
     const lead = await this.leadModel.findById(id);
     if (!lead) throw new NotFoundException('Lead not found');
     if (lead.projectId && dto.value !== undefined && round2(dto.value) !== lead.value) {
@@ -111,13 +120,93 @@ export class LeadsService {
       );
     }
     if (dto.ownerId) await this.staff.assertExist([dto.ownerId], undefined, 'ownerId');
-    const { expectedClose, ...rest } = dto;
-    lead.set(rest);
+    const { expectedClose, customerId, visibleToClient, showValueToClient, ...rest } = dto;
+    const accessChange = { customerId, visibleToClient, showValueToClient };
+    const access = this.hasAccessChange(accessChange)
+      ? await this.resolveClientAccess(lead, accessChange)
+      : null;
+    // Aliased DTO fields are always present (possibly undefined); never let them unset data.
+    lead.set(Object.fromEntries(Object.entries(rest).filter(([, v]) => v !== undefined)));
     if (expectedClose !== undefined) {
       lead.expectedClose = expectedClose ? parseDateOnly(expectedClose) : null;
     }
+    if (access) lead.set(access);
     await lead.save();
+    if (access) this.logAccess(id, access, actor);
     return this.get(id);
+  }
+
+  /** Link a lead to a customer account and control what that customer sees in the portal. */
+  async setClientAccess(
+    id: string,
+    dto: LeadClientAccessDto,
+    actor: AuthUser,
+  ): Promise<LeadDetailResponse> {
+    const lead = await this.leadModel.findById(id);
+    if (!lead) throw new NotFoundException('Lead not found');
+    const access = await this.resolveClientAccess(lead, dto);
+    lead.set(access);
+    await lead.save();
+    this.logAccess(id, access, actor);
+    return this.get(id);
+  }
+
+  private hasAccessChange(dto: LeadClientAccessDto): boolean {
+    return (
+      dto.customerId !== undefined ||
+      dto.visibleToClient !== undefined ||
+      dto.showValueToClient !== undefined
+    );
+  }
+
+  /**
+   * Final portal-access state after applying `dto` (omitted fields keep their current value):
+   * - visibleToClient requires a customerId (400)
+   * - customerId must reference a live customer (400)
+   * - clearing customerId resets both flags
+   * - a converted lead stays linked to its project's customer (409 on change)
+   */
+  private async resolveClientAccess(
+    current: Pick<
+      Lead,
+      'customerId' | 'visibleToClient' | 'showValueToClient' | 'projectId'
+    > | null,
+    dto: LeadClientAccessDto,
+  ): Promise<{ customerId: string | null; visibleToClient: boolean; showValueToClient: boolean }> {
+    const currentCustomer = idOf(current?.customerId ?? null);
+    const customerId = dto.customerId === undefined ? currentCustomer : dto.customerId;
+
+    if (current?.projectId && customerId !== currentCustomer) {
+      throw new ConflictException(
+        "Lead is converted; its client account follows the project's customer",
+      );
+    }
+    if (!customerId) {
+      if (dto.visibleToClient) {
+        throw new BadRequestException('visibleToClient requires a customerId');
+      }
+      return { customerId: null, visibleToClient: false, showValueToClient: false };
+    }
+    if (customerId !== currentCustomer) {
+      const exists = await this.customerModel.exists({ _id: customerId });
+      if (!exists) throw new BadRequestException('customerId does not reference a customer');
+    }
+    return {
+      customerId,
+      visibleToClient: dto.visibleToClient ?? current?.visibleToClient ?? false,
+      showValueToClient: dto.showValueToClient ?? current?.showValueToClient ?? false,
+    };
+  }
+
+  private logAccess(
+    id: string,
+    access: { customerId: string | null; visibleToClient: boolean; showValueToClient: boolean },
+    actor: AuthUser,
+  ): void {
+    this.logger.log(
+      `Lead ${id} client access by ${actor.email}: customer=${access.customerId ?? 'none'} ` +
+        `visible=${access.visibleToClient} showValue=${access.showValueToClient}`,
+    );
   }
 
   /**

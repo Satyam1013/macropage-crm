@@ -1,9 +1,10 @@
-import { ApiProperty, ApiPropertyOptional, OmitType, PartialType } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional, OmitType, PartialType, PickType } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
 import {
   ArrayMaxSize,
   ArrayUnique,
   IsArray,
+  IsBoolean,
   IsEmail,
   IsIn,
   IsMongoId,
@@ -78,10 +79,32 @@ export class CreateLeadDto {
   @IsString()
   @MaxLength(5000)
   notes?: string;
+
+  /** Customer account the lead is shared with in the portal; null unlinks (and hides) it. */
+  @ApiPropertyOptional({ nullable: true, type: String })
+  @IsOptional()
+  @IsMongoId()
+  customerId?: string | null;
+
+  /** Show the lead under "My Discussions" in the customer's portal. Requires customerId. */
+  @IsOptional()
+  @IsBoolean()
+  visibleToClient?: boolean;
+
+  /** Include the deal value in the customer's discussion view. */
+  @IsOptional()
+  @IsBoolean()
+  showValueToClient?: boolean;
 }
 
 /** Stage is changed only through PATCH /leads/:id/stage. */
 export class UpdateLeadDto extends PartialType(OmitType(CreateLeadDto, ['stage'] as const)) {}
+
+export class LeadClientAccessDto extends PickType(CreateLeadDto, [
+  'customerId',
+  'visibleToClient',
+  'showValueToClient',
+] as const) {}
 
 export class UpdateLeadStageDto {
   @ApiProperty({ enum: LEAD_STAGES })

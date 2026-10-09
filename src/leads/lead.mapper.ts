@@ -22,6 +22,8 @@ export interface LeadResponse {
   wonAt: string | null;
   projectId: string | null;
   customerId: string | null;
+  visibleToClient: boolean;
+  showValueToClient: boolean;
   stageUpdatedAt: string | null;
 }
 
@@ -47,6 +49,8 @@ export function toLeadResponse(l: Lead): LeadResponse {
     wonAt: toIso(l.wonAt),
     projectId: idOf(l.projectId),
     customerId: idOf(l.customerId),
+    visibleToClient: !!l.visibleToClient,
+    showValueToClient: !!l.showValueToClient,
     stageUpdatedAt: toIso(l.stageUpdatedAt),
   };
 }
