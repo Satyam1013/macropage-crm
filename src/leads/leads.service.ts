@@ -112,7 +112,8 @@ export class LeadsService {
     }
     if (dto.ownerId) await this.staff.assertExist([dto.ownerId], undefined, 'ownerId');
     const { expectedClose, ...rest } = dto;
-    lead.set(rest);
+    // Aliased DTO fields are always present (possibly undefined); never let them unset data.
+    lead.set(Object.fromEntries(Object.entries(rest).filter(([, v]) => v !== undefined)));
     if (expectedClose !== undefined) {
       lead.expectedClose = expectedClose ? parseDateOnly(expectedClose) : null;
     }

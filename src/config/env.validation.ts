@@ -66,6 +66,16 @@ export class EnvironmentVariables {
   @IsOptional()
   @Transform(({ value }) => value === true || value === 'true')
   SWAGGER_ENABLED?: boolean;
+
+  /**
+   * Reverse-proxy hops to trust for the client IP (rate limiting). Defaults to 1 in production
+   * (Render, Railway, nginx…) and 0 elsewhere.
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  TRUST_PROXY?: number;
 }
 
 export function validateEnv(config: Record<string, unknown>): EnvironmentVariables {
