@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional, OmitType, PartialType, PickType } from '@nestjs/swagger';
-import { Transform } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   ArrayUnique,
@@ -9,14 +9,49 @@ import {
   IsIn,
   IsMongoId,
   IsNotEmpty,
+  IsObject,
   IsOptional,
   IsString,
   Matches,
   MaxLength,
   ValidateIf,
+  ValidateNested,
 } from 'class-validator';
-import { LEAD_STAGES, LeadStage } from '../../common/constants/enums';
-import { Alias, IsDateOnly, IsMoney, Trim } from '../../common/dto/validators';
+import { LEAD_STAGES, LeadStage, PROJECT_PLANS, ProjectPlan } from '../../common/constants/enums';
+import { Alias, IsDateOnly, IsMoney, IsPhone, Trim } from '../../common/dto/validators';
+
+/** Quoted price per plan; both are required and must be > 0. */
+export class LeadQuoteDto {
+  @ApiProperty({ minimum: 0.01, example: 25000 })
+  @IsMoney({ positive: true })
+  PRO: number;
+
+  @ApiProperty({ minimum: 0.01, example: 40000 })
+  @IsMoney({ positive: true })
+  PREMIUM: number;
+}
+
+/** A client to create (or reuse, when a customer already has this phone) and link. */
+export class NewClientDto {
+  /** Contact person; also the login's display name. */
+  @ApiProperty({ example: 'Rahul Shah' })
+  @IsString()
+  @Trim()
+  @IsNotEmpty()
+  @MaxLength(120)
+  name: string;
+
+  /** Normalised to digits with country code; the client's portal login. */
+  @ApiProperty({ example: '9876543210' })
+  @IsPhone()
+  phone: string;
+
+  @ApiPropertyOptional({ nullable: true, type: String })
+  @IsOptional()
+  @ValidateIf((o: NewClientDto) => o.email !== '')
+  @IsEmail()
+  email?: string | null;
+}
 
 export class CreateLeadDto {
   @IsString()
@@ -59,6 +94,14 @@ export class CreateLeadDto {
   @IsMoney()
   value?: number;
 
+  /** Required before the lead can enter PROPOSAL. Cannot be cleared once set. */
+  @ApiPropertyOptional({ type: LeadQuoteDto })
+  @ValidateIf((o: CreateLeadDto) => o.quote !== undefined)
+  @IsObject()
+  @ValidateNested()
+  @Type(() => LeadQuoteDto)
+  quote?: LeadQuoteDto;
+
   /** Staff id of the owner. The frontend's `owner` key is accepted as an alias. */
   @Alias('owner')
   @IsMongoId()
@@ -86,15 +129,28 @@ export class CreateLeadDto {
   @IsMongoId()
   customerId?: string | null;
 
-  /** Show the lead under "My Discussions" in the customer's portal. Requires customerId. */
+  /** Create or reuse (by phone) a customer + portal login and link it. Excludes customerId. */
+  @ApiPropertyOptional({ type: NewClientDto, nullable: true })
+  @IsOptional()
+  @IsObject()
+  @ValidateNested()
+  @Type(() => NewClientDto)
+  newClient?: NewClientDto | null;
+
+  /** Show the lead under "My Discussions" in the customer's portal. Ignored without a client. */
   @IsOptional()
   @IsBoolean()
   visibleToClient?: boolean;
 
-  /** Include the deal value in the customer's discussion view. */
+  /** Include the deal value in the customer's discussion view. Requires visibleToClient. */
   @IsOptional()
   @IsBoolean()
   showValueToClient?: boolean;
+
+  /** Queue a WhatsApp portal invite to the linked client's phone after saving. Not stored. */
+  @IsOptional()
+  @IsBoolean()
+  sendWhatsapp?: boolean;
 }
 
 /** Stage is changed only through PATCH /leads/:id/stage. */
@@ -102,8 +158,10 @@ export class UpdateLeadDto extends PartialType(OmitType(CreateLeadDto, ['stage']
 
 export class LeadClientAccessDto extends PickType(CreateLeadDto, [
   'customerId',
+  'newClient',
   'visibleToClient',
   'showValueToClient',
+  'sendWhatsapp',
 ] as const) {}
 
 export class UpdateLeadStageDto {
@@ -141,6 +199,11 @@ export class ConvertLeadDto {
   @IsMoney({ positive: true })
   contractValue: number;
 
+  /** The plan the client chose. contractValue is the final price, not derived from the quote. */
+  @ApiProperty({ enum: PROJECT_PLANS })
+  @IsIn(PROJECT_PLANS)
+  plan: ProjectPlan;
+
   @ApiProperty({ example: '2026-11-01' })
   @IsDateOnly()
   startDate: string;
@@ -149,13 +212,18 @@ export class ConvertLeadDto {
   @IsDateOnly()
   endDate: string;
 
-  /** An existing customer id, or "NEW" to create one from the lead's company/contact. */
-  @ApiProperty({ example: 'NEW', description: 'Customer ObjectId or "NEW"' })
+  /**
+   * An existing customer id, or "NEW" to create one from the lead's company/contact (reusing
+   * the customer that already has the lead's phone). Optional when the lead is already linked
+   * to a customer; it must then match that customer (409).
+   */
+  @ApiPropertyOptional({ example: 'NEW', description: 'Customer ObjectId or "NEW"' })
+  @IsOptional()
   @Transform(({ value }) =>
     typeof value === 'string' && value.toUpperCase() === 'NEW' ? 'NEW' : value,
   )
   @Matches(/^(NEW|[a-f\d]{24})$/i, { message: 'customerId must be an ObjectId or "NEW"' })
-  customerId: string;
+  customerId?: string;
 
   @ApiPropertyOptional({ description: 'Project name; defaults to the lead title' })
   @IsOptional()

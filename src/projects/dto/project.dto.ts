@@ -12,7 +12,12 @@ import {
   IsString,
   MaxLength,
 } from 'class-validator';
-import { PROJECT_STAGES, ProjectStage } from '../../common/constants/enums';
+import {
+  PROJECT_PLANS,
+  PROJECT_STAGES,
+  ProjectPlan,
+  ProjectStage,
+} from '../../common/constants/enums';
 import { IsDateOnly, IsMoney, Trim } from '../../common/dto/validators';
 import { clampPercent } from '../project-progress';
 
@@ -74,6 +79,11 @@ export class UpdateProjectDto {
   @IsOptional()
   @IsMoney({ positive: true })
   contractValue?: number;
+
+  @ApiPropertyOptional({ enum: PROJECT_PLANS })
+  @IsOptional()
+  @IsIn(PROJECT_PLANS)
+  plan?: ProjectPlan;
 }
 
 export class UpdateProjectStageDto {

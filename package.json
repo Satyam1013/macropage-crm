@@ -14,6 +14,8 @@
     "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/main",
     "seed": "ts-node --transpile-only src/seed.ts",
+    "migrate:phone-login": "ts-node --transpile-only src/migrations/run-phone-login.ts",
+    "migrate:expense-scope": "ts-node --transpile-only src/migrations/run-expense-scope.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "test": "jest",

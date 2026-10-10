@@ -19,6 +19,7 @@ import type {
 import { LEAD_STAGES, PROJECT_STAGES } from './common/constants/enums';
 import { Customer } from './customers/schemas/customer.schema';
 import { Expense } from './expenses/schemas/expense.schema';
+import { InternalProject } from './internal-projects/schemas/internal-project.schema';
 import { Lead } from './leads/schemas/lead.schema';
 import { Payment } from './payments/schemas/payment.schema';
 import { Project } from './projects/schemas/project.schema';
@@ -57,6 +58,12 @@ const leadPath = (stage: LeadStage): LeadStage[] => {
   return LEAD_STAGES.slice(0, LEAD_STAGES.indexOf(stage) + 1) as LeadStage[];
 };
 
+/** Quote where `value` is the PREMIUM price and PRO is ~75% of it, rounded to ₹1,000. */
+const quoteFor = (value: number) => ({
+  PRO: Math.round((value * 0.75) / 1000) * 1000,
+  PREMIUM: value,
+});
+
 const projectPath = (stage: ProjectStage): ProjectStage[] =>
   PROJECT_STAGES.slice(0, PROJECT_STAGES.indexOf(stage) + 1) as ProjectStage[];
 
@@ -79,6 +86,7 @@ async function main(): Promise<void> {
     const Projects = model<Project>(Project.name);
     const Payments = model<Payment>(Payment.name);
     const Expenses = model<Expense>(Expense.name);
+    const InternalProjects = model<InternalProject>(InternalProject.name);
     const all = [
       Users,
       Customers,
@@ -87,6 +95,7 @@ async function main(): Promise<void> {
       Projects,
       Payments,
       Expenses,
+      InternalProjects,
     ] as unknown as Model<unknown>[];
 
     logger.log(`Seeding database "${connection.name}"…`);
@@ -366,6 +375,7 @@ async function main(): Promise<void> {
             `${l.contactName.split(' ').slice(-1)[0].toLowerCase()}@${l.company.split(' ')[0].toLowerCase()}.example`,
           source: l.source,
           value: l.value,
+          quote: path.includes('PROPOSAL') ? quoteFor(l.value) : null,
           stage: l.stage,
           ownerId: l.owner,
           expectedClose: l.expectedClose === null ? null : dateOnly(l.expectedClose),
@@ -612,7 +622,13 @@ async function main(): Promise<void> {
 
     let paymentCount = 0;
     let expenseCount = 0;
-    for (const deal of deals) {
+    for (const [i, deal] of deals.entries()) {
+      // Alternate plans; the contract is the chosen plan's quoted price.
+      const plan = i % 2 === 0 ? 'PREMIUM' : 'PRO';
+      const quote =
+        plan === 'PREMIUM'
+          ? quoteFor(deal.contract)
+          : { PRO: deal.contract, PREMIUM: Math.round(deal.contract / 0.75 / 1000) * 1000 };
       const leadId = new Types.ObjectId();
       const projectId = new Types.ObjectId();
       const leadHist = history(leadPath('WON'), by, deal.wonDaysAgo + 40, deal.wonDaysAgo);
@@ -638,6 +654,7 @@ async function main(): Promise<void> {
         email: deal.customer.email,
         source: deal.source,
         value: deal.contract,
+        quote,
         stage: 'WON',
         ownerId: deal.owner,
         expectedClose: dateOnly(-deal.wonDaysAgo),
@@ -661,6 +678,7 @@ async function main(): Promise<void> {
         startDate: dateOnly(deal.start),
         endDate: dateOnly(deal.end),
         contractValue: deal.contract,
+        plan,
         dev: deal.dev,
         team: deal.team,
         clientApproved: deal.stage === 'CLOSED',
@@ -697,9 +715,179 @@ async function main(): Promise<void> {
       }
     }
 
+    // ---- Internal projects (2), costs recorded as expenses ------------------------------
+    const internalProjects: {
+      name: string;
+      description: string;
+      status: 'ACTIVE' | 'PLANNED' | 'ON_HOLD' | 'COMPLETED';
+      budget: number;
+      start: number;
+      end: number;
+      expenses: {
+        staff: Types.ObjectId;
+        category: ExpenseCategory;
+        amount: number;
+        daysAgo: number;
+        note: string;
+      }[];
+    }[] = [
+      {
+        name: 'MACROPAGE website redesign',
+        description: 'New marketing site with case studies and a lead form.',
+        status: 'ACTIVE',
+        budget: 120000,
+        start: -45,
+        end: 30,
+        expenses: [
+          {
+            staff: priya._id,
+            category: 'SALARY',
+            amount: 35000,
+            daysAgo: 30,
+            note: 'Design sprint',
+          },
+          {
+            staff: arjun._id,
+            category: 'SOFTWARE_TOOLS',
+            amount: 4200,
+            daysAgo: 25,
+            note: 'Figma + stock photos',
+          },
+          {
+            staff: arjun._id,
+            category: 'CLOUD_HOSTING',
+            amount: 1800,
+            daysAgo: 10,
+            note: 'Staging hosting',
+          },
+          {
+            staff: vikram._id,
+            category: 'DOMAIN_SSL',
+            amount: 1500,
+            daysAgo: 8,
+            note: 'macropage.in renewal',
+          },
+        ],
+      },
+      {
+        name: 'Internal CRM tooling',
+        description: 'Automations and reports for the sales team.',
+        status: 'ON_HOLD',
+        budget: 60000,
+        start: -90,
+        end: -10,
+        expenses: [
+          {
+            staff: rohan._id,
+            category: 'SALARY',
+            amount: 22000,
+            daysAgo: 80,
+            note: 'Reporting module',
+          },
+          {
+            staff: ananya._id,
+            category: 'SOFTWARE_TOOLS',
+            amount: 3500,
+            daysAgo: 60,
+            note: 'Zapier plan',
+          },
+          {
+            staff: karan._id,
+            category: 'MARKETING',
+            amount: 6000,
+            daysAgo: 40,
+            note: 'Sales-deck templates',
+          },
+        ],
+      },
+    ];
+    for (const ip of internalProjects) {
+      const project = await InternalProjects.create({
+        name: ip.name,
+        description: ip.description,
+        status: ip.status,
+        budget: ip.budget,
+        startDate: dateOnly(ip.start),
+        endDate: dateOnly(ip.end),
+        createdAt: daysAgo(-ip.start),
+      });
+      await Expenses.insertMany(
+        ip.expenses.map((e) => ({
+          scope: 'INTERNAL_PROJECT',
+          internalProjectId: project._id,
+          staffId: e.staff,
+          category: e.category,
+          amount: e.amount,
+          spentOn: dateOnly(-e.daysAgo),
+          note: e.note,
+        })),
+      );
+      expenseCount += ip.expenses.length;
+    }
+
+    // ---- Company & owner expenses (no project; staff only on some) ----------------------
+    const businessExpenses: {
+      scope: 'COMPANY' | 'OWNER';
+      category: ExpenseCategory;
+      amount: number;
+      daysAgo: number;
+      note: string;
+      staff?: Types.ObjectId;
+    }[] = [
+      {
+        scope: 'COMPANY',
+        category: 'OFFICE_MISC',
+        amount: 45000,
+        daysAgo: 35,
+        note: 'Office rent',
+      },
+      { scope: 'COMPANY', category: 'OFFICE_MISC', amount: 45000, daysAgo: 5, note: 'Office rent' },
+      {
+        scope: 'COMPANY',
+        category: 'SOFTWARE_TOOLS',
+        amount: 8600,
+        daysAgo: 20,
+        note: 'Google Workspace + Slack',
+        staff: vikram._id,
+      },
+      {
+        scope: 'COMPANY',
+        category: 'SALARY',
+        amount: 30000,
+        daysAgo: 3,
+        note: 'Office manager',
+        staff: ananya._id,
+      },
+      {
+        scope: 'OWNER',
+        category: 'TRAVEL',
+        amount: 12500,
+        daysAgo: 15,
+        note: 'Client visit, Mumbai',
+      },
+      {
+        scope: 'OWNER',
+        category: 'MARKETING',
+        amount: 7000,
+        daysAgo: 9,
+        note: 'Industry meetup ticket',
+      },
+    ];
+    await Expenses.insertMany(
+      businessExpenses.map((e) => ({
+        scope: e.scope,
+        staffId: e.staff ?? null,
+        category: e.category,
+        amount: e.amount,
+        spentOn: dateOnly(-e.daysAgo),
+        note: e.note,
+      })),
+    );
+    expenseCount += businessExpenses.length;
+
     console.log(`
 ✔ Seed complete
-  Staff: ${staff.length}   Customers: 4   Leads: ${openLeads.length + deals.length}   Projects: ${deals.length}
+  Staff: ${staff.length}   Customers: 4   Leads: ${openLeads.length + deals.length}   Projects: ${deals.length}   Internal projects: ${internalProjects.length}
   Payments: ${paymentCount}   Expenses: ${expenseCount}
 
   Admin     admin@macropage.in / admin123   (role ADMIN)

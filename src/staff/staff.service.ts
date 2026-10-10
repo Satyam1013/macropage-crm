@@ -1,18 +1,23 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import type { ClientSession, FilterQuery } from 'mongoose';
+import { InjectConnection, InjectModel } from '@nestjs/mongoose';
+import type { ClientSession, Connection, FilterQuery } from 'mongoose';
 import { paginated, PaginatedResult, skipFor } from '../common/dto/pagination.dto';
 import type { SoftDeleteModel } from '../common/plugins/soft-delete.plugin';
 import { containsAny } from '../common/utils/regex.util';
 import { CreateStaffDto, ListStaffQueryDto, UpdateStaffDto } from './dto/staff.dto';
 import { Staff } from './schemas/staff.schema';
-import { StaffResponse, toStaffResponse } from './staff.mapper';
+import { WorkLogsService } from '../work-logs/work-logs.service';
+import { StaffResponse, StaffWithWorkResponse, toStaffResponse } from './staff.mapper';
 
 @Injectable()
 export class StaffService {
-  constructor(@InjectModel(Staff.name) private readonly staffModel: SoftDeleteModel<Staff>) {}
+  constructor(
+    @InjectConnection() private readonly connection: Connection,
+    @InjectModel(Staff.name) private readonly staffModel: SoftDeleteModel<Staff>,
+    private readonly workLogs: WorkLogsService,
+  ) {}
 
-  async list(query: ListStaffQueryDto): Promise<PaginatedResult<StaffResponse>> {
+  async list(query: ListStaffQueryDto): Promise<PaginatedResult<StaffWithWorkResponse>> {
     const filter: FilterQuery<Staff> = {
       ...(containsAny(['name', 'role', 'email'], query.search) ?? {}),
     };
@@ -22,13 +27,19 @@ export class StaffService {
       this.staffModel.find(filter).sort({ name: 1 }).skip(skipFor(query)).limit(query.limit).lean(),
       this.staffModel.countDocuments(filter),
     ]);
-    return paginated(rows.map(toStaffResponse), total, query);
+    return paginated(await this.withCurrentWork(rows.map(toStaffResponse)), total, query);
   }
 
-  async get(id: string): Promise<StaffResponse> {
+  async get(id: string): Promise<StaffWithWorkResponse> {
     const staff = await this.staffModel.findById(id).lean();
     if (!staff) throw new NotFoundException('Staff member not found');
-    return toStaffResponse(staff);
+    const [res] = await this.withCurrentWork([toStaffResponse(staff)]);
+    return res;
+  }
+
+  private async withCurrentWork(staff: StaffResponse[]): Promise<StaffWithWorkResponse[]> {
+    const work = await this.workLogs.currentWorkByStaff(staff.map((s) => s.id));
+    return staff.map((s) => ({ ...s, currentWork: work.get(s.id) ?? [] }));
   }
 
   async create(dto: CreateStaffDto): Promise<StaffResponse> {
@@ -45,8 +56,16 @@ export class StaffService {
   }
 
   async remove(id: string): Promise<{ id: string; deleted: true }> {
-    const deleted = await this.staffModel.softDelete(id);
-    if (!deleted) throw new NotFoundException('Staff member not found');
+    const session = await this.connection.startSession();
+    try {
+      await session.withTransaction(async () => {
+        const deleted = await this.staffModel.softDelete(id, session);
+        if (!deleted) throw new NotFoundException('Staff member not found');
+        await this.workLogs.removeFor({ staffId: id }, session);
+      });
+    } finally {
+      await session.endSession();
+    }
     return { id, deleted: true };
   }
 

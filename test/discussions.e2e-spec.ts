@@ -10,6 +10,7 @@ import {
 
 const PRIVATE_KEYS = [
   'notes',
+  'quote',
   'source',
   'ownerId',
   'owner',
@@ -73,6 +74,7 @@ describe('Client portal: My Discussions', () => {
         source: 'SecretSource',
         notes: 'INTERNAL: client is price-sensitive',
         value: 123456,
+        quote: { PRO: 100000, PREMIUM: 123456 },
         owner: fx.staffMemberId,
         expectedClose: '2026-12-31',
         ...(opts.customerId ? { customerId: opts.customerId } : {}),
@@ -224,6 +226,7 @@ describe('Client portal: My Discussions', () => {
       .set(admin)
       .send({
         contractValue: 150000,
+        plan: 'PRO',
         startDate: '2026-11-01',
         endDate: '2027-01-31',
         customerId: fx.customerA,
@@ -272,33 +275,37 @@ describe('Client portal: My Discussions', () => {
       await ctx.http().get(`/api/portal/discussions/${id}`).set(alice).expect(404);
     });
 
-    it('rejects visibleToClient without a customer, and unknown customers', async () => {
+    it('forces visibility off without a customer, and rejects unknown customers', async () => {
       const id = await lead('No customer');
-      const res = await ctx
-        .http()
-        .patch(`/api/leads/${id}/client-access`)
-        .set(admin)
-        .send({ visibleToClient: true })
-        .expect(400);
-      expect(res.body.message).toMatch(/customerId/);
-      await ctx
-        .http()
-        .patch(`/api/leads/${id}/client-access`)
-        .set(admin)
-        .send({ customerId: null, visibleToClient: true })
-        .expect(400);
+      for (const body of [
+        { visibleToClient: true, showValueToClient: false },
+        { customerId: null, visibleToClient: true },
+      ]) {
+        const res = await ctx
+          .http()
+          .patch(`/api/leads/${id}/client-access`)
+          .set(admin)
+          .send(body)
+          .expect(200);
+        expect(res.body).toMatchObject({
+          customerId: null,
+          visibleToClient: false,
+          showValueToClient: false,
+        });
+      }
       await ctx
         .http()
         .patch(`/api/leads/${id}/client-access`)
         .set(admin)
         .send({ customerId: '507f1f77bcf86cd799439011', visibleToClient: true })
         .expect(400);
-      await ctx
+      const created = await ctx
         .http()
         .post('/api/leads')
         .set(admin)
         .send({ title: 't', company: 'c', owner: fx.staffMemberId, visibleToClient: true })
-        .expect(400);
+        .expect(201);
+      expect(created.body.visibleToClient).toBe(false);
       await ctx
         .http()
         .patch(`/api/leads/${id}/client-access`)
@@ -353,6 +360,7 @@ describe('Client portal: My Discussions', () => {
         .set(admin)
         .send({
           contractValue: 1000,
+          plan: 'PRO',
           startDate: '2026-11-01',
           endDate: '2026-12-01',
           customerId: fx.customerA,

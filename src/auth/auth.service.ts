@@ -54,18 +54,30 @@ export class AuthService {
   ) {}
 
   async login(dto: LoginDto): Promise<LoginResponse> {
-    const user = await this.users.findByEmailWithSecrets(dto.email);
-    const valid = await bcrypt.compare(dto.password, user?.passwordHash ?? DUMMY_HASH);
-    if (!user || !valid) {
-      this.logger.warn(`Failed login for ${dto.email}`);
-      throw new UnauthorizedException('Invalid email or password');
+    const byPhone = dto.role === 'CUSTOMER' && !!dto.phone;
+    const login = byPhone ? dto.phone! : dto.email!;
+    const candidates = byPhone
+      ? await this.users.findCustomerLoginsByPhoneWithSecrets(dto.phone!)
+      : [await this.users.findByEmailWithSecrets(dto.email!)].filter((u) => u !== null);
+    // A customer may have several logins sharing its phone: the password picks the account.
+    let user: UserDocument | null = null;
+    for (const candidate of candidates) {
+      if (await bcrypt.compare(dto.password, candidate.passwordHash)) {
+        user = candidate;
+        break;
+      }
+    }
+    if (candidates.length === 0) await bcrypt.compare(dto.password, DUMMY_HASH);
+    if (!user) {
+      this.logger.warn(`Failed login for ${login}`);
+      throw new UnauthorizedException(`Invalid ${byPhone ? 'phone number' : 'email'} or password`);
     }
     if (!user.isActive) {
-      this.logger.warn(`Login attempt on inactive account ${user.email}`);
+      this.logger.warn(`Login attempt on inactive account ${login}`);
       throw new ForbiddenException('This account is disabled');
     }
     if (user.role !== dto.role) {
-      this.logger.warn(`Login role mismatch for ${user.email}: requested ${dto.role}`);
+      this.logger.warn(`Login role mismatch for ${login}: requested ${dto.role}`);
       throw new ForbiddenException(
         dto.role === 'ADMIN'
           ? 'This account is not an admin account. Use the Customer login.'
@@ -77,7 +89,7 @@ export class AuthService {
     }
 
     const tokens = await this.issueTokens(user);
-    this.logger.log(`Login: ${user.email} (${user.role})`);
+    this.logger.log(`Login: ${login} (${user.role})`);
     return { ...tokens, user: await this.profile(user) };
   }
 
@@ -99,7 +111,7 @@ export class AuthService {
     if (!safeEqual(user.refreshTokenHash, digest(refreshToken))) {
       // A rotated-out token was replayed: revoke the session entirely.
       await this.users.setRefreshTokenHash(user.id as string, null);
-      this.logger.warn(`Refresh token reuse detected for ${user.email}; session revoked`);
+      this.logger.warn(`Refresh token reuse detected for user ${user.id}; session revoked`);
       throw new UnauthorizedException('Session has ended, please sign in again');
     }
     const tokens = await this.issueTokens(user);
@@ -108,7 +120,7 @@ export class AuthService {
 
   async logout(actor: AuthUser): Promise<{ message: string }> {
     await this.users.setRefreshTokenHash(actor.id, null);
-    this.logger.log(`Logout: ${actor.email}`);
+    this.logger.log(`Logout: ${actor.email ?? actor.id}`);
     return { message: 'Logged out' };
   }
 
@@ -127,7 +139,7 @@ export class AuthService {
       throw new ForbiddenException('New password must differ from the current password');
     }
     await this.users.setPassword(actor.id, dto.newPassword);
-    this.logger.log(`Password changed: ${user.email}`);
+    this.logger.log(`Password changed: ${user.email ?? user.id}`);
     // Other sessions are revoked by setPassword; issue a fresh pair for this one.
     const tokens = await this.issueTokens(user);
     return { ...tokens, user: await this.profile(user) };

@@ -1,6 +1,6 @@
-import { PartialType } from '@nestjs/swagger';
+import { ApiPropertyOptional, PartialType } from '@nestjs/swagger';
 import { IsEmail, IsNotEmpty, IsOptional, IsString, MaxLength, ValidateIf } from 'class-validator';
-import { Trim } from '../../common/dto/validators';
+import { IsPhone, Trim } from '../../common/dto/validators';
 
 export class CreateCustomerDto {
   /** Company name. */
@@ -21,11 +21,11 @@ export class CreateCustomerDto {
   @IsEmail()
   email?: string;
 
+  /** Normalised to digits with country code; must be unique. '' or null clears it. */
+  @ApiPropertyOptional({ example: '9876543210', nullable: true, type: String })
   @IsOptional()
-  @IsString()
-  @Trim()
-  @MaxLength(40)
-  phone?: string;
+  @IsPhone()
+  phone?: string | null;
 
   @IsOptional()
   @IsString()

@@ -67,6 +67,23 @@ export class EnvironmentVariables {
   @Transform(({ value }) => value === true || value === 'true')
   SWAGGER_ENABLED?: boolean;
 
+  /** Client portal URL included in WhatsApp invites. */
+  @IsString()
+  PORTAL_URL = 'http://localhost:5173';
+
+  /** How often the WhatsApp outbox is drained, in milliseconds. 0 disables the worker. */
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  WHATSAPP_POLL_MS = 5000;
+
+  /** Send attempts per WhatsApp message before it stays FAILED (manual retry still possible). */
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(20)
+  WHATSAPP_MAX_ATTEMPTS = 5;
+
   /**
    * Reverse-proxy hops to trust for the client IP (rate limiting). Defaults to 1 in production
    * (Render, Railway, nginx…) and 0 elsewhere.

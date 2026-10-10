@@ -1,7 +1,12 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import { IsIn, IsInt, IsMongoId, IsOptional, Max, Min } from 'class-validator';
-import { EXPENSE_CATEGORIES, ExpenseCategory } from '../../common/constants/enums';
+import {
+  EXPENSE_CATEGORIES,
+  EXPENSE_SCOPES,
+  ExpenseCategory,
+  ExpenseScope,
+} from '../../common/constants/enums';
 import { IsDateOnly } from '../../common/dto/validators';
 
 export class MonthlyQueryDto {
@@ -19,6 +24,11 @@ export class ExpenseBreakdownQueryDto {
   @IsOptional()
   @IsMongoId()
   projectId?: string;
+
+  @ApiPropertyOptional({ enum: EXPENSE_SCOPES })
+  @IsOptional()
+  @IsIn(EXPENSE_SCOPES)
+  scope?: ExpenseScope;
 
   @ApiPropertyOptional({ example: '2026-01-01', description: 'Inclusive (spentOn >= from)' })
   @IsOptional()

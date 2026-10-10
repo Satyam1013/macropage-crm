@@ -30,13 +30,13 @@ Optional Mongo web UI: `docker compose --profile tools up -d`, then open http://
 
 ### Seeded credentials
 
-| Role | Email | Password | Notes |
+| Role | Login | Password | Notes |
 |---|---|---|---|
 | ADMIN | `admin@macropage.in` | `admin123` | Full access |
-| CUSTOMER | `client@demo.com` | `client123` | Demo Retail Pvt. Ltd.: 2 projects (IN_PROGRESS, INITIATE) + 2 discussions (QUALIFIED; PROPOSAL with value shown) |
-| CUSTOMER | `hotel@demo.com` | `client123` | Seaside Hotels & Resorts: 1 project **awaiting approval** + 1 discussion (NEGOTIATION) |
+| CUSTOMER | phone `9800020001` (or `client@demo.com`) | `client123` | Demo Retail Pvt. Ltd.: 2 projects (IN_PROGRESS, INITIATE) + 2 discussions (QUALIFIED; PROPOSAL with value shown) |
+| CUSTOMER | phone `9800020002` (or `hotel@demo.com`) | `client123` | Seaside Hotels & Resorts: 1 project **awaiting approval** + 1 discussion (NEGOTIATION) |
 
-The seed also creates 7 staff, 4 customers, 16 leads across every stage, 5 projects (INITIATE, IN_PROGRESS, TESTING, CLIENT_CONFIRMATION, CLOSED), and payments and expenses spread over the last 6 months. All data is fictional.
+The seed also creates 7 staff, 4 customers, 16 leads across every stage, 5 projects (INITIATE, IN_PROGRESS, TESTING, CLIENT_CONFIRMATION, CLOSED), 2 internal projects with their expenses, 4 company and 2 owner expenses (some without staff), and payments and expenses spread over the last 6 months. All data is fictional.
 
 ### Verify with Swagger
 1. Open http://localhost:4000/api/docs.
@@ -54,6 +54,8 @@ The seed also creates 7 staff, 4 customers, 16 leads across every stage, 5 proje
 | `npm run start:dev` | Watch mode |
 | `npm run build` / `npm run start:prod` | Compile to `dist/` / run compiled build |
 | `npm run seed` | Reset DB and load demo data (refuses in production unless `SEED_FORCE=true`) |
+| `npm run migrate:phone-login` | Dry run of the phone-login data migration; add `-- --apply` to write (see below) |
+| `npm run migrate:expense-scope` | Dry run of the expense `scope` backfill; add `-- --apply` to write (see below) |
 | `npm test` | All tests (unit + integration on an in-memory replica set; MongoDB binary downloads on first run) |
 | `npm run test:cov` | Tests with coverage |
 | `npm run typecheck` / `npm run format` | `tsc --noEmit` / Prettier |
@@ -72,6 +74,9 @@ The seed also creates 7 staff, 4 customers, 16 leads across every stage, 5 proje
 | `SWAGGER_ENABLED` | on unless production | Force Swagger on/off |
 | `TRUST_PROXY` | `1` in production, else `0` | Reverse-proxy hops to trust for client IPs (rate limiting behind Render etc.) |
 | `MONGO_PORT` | `27017` | docker compose only: host port for MongoDB |
+| `PORTAL_URL` | `http://localhost:5173` | Client portal link in WhatsApp invites |
+| `WHATSAPP_POLL_MS` | `5000` | How often the WhatsApp outbox is drained; `0` disables the worker |
+| `WHATSAPP_MAX_ATTEMPTS` | `5` | Automatic send attempts per message (with backoff) before it stays `FAILED` |
 
 The env is validated at boot; the app refuses to start on invalid config.
 
@@ -83,12 +88,13 @@ All routes are prefixed with `/api`. Every route is **ADMIN-only** unless marked
 
 | Screen | Endpoints |
 |---|---|
-| **Login** (Admin / Customer toggle) | `POST /auth/login` `{email,password,role}` (public) · `POST /auth/refresh` (public) · `POST /auth/logout` · `GET /auth/me` (both roles) |
+| **Login** (Admin / Customer toggle) | `POST /auth/login` `{email,password,role:"ADMIN"}` or `{phone,password,role:"CUSTOMER"}` (public) · `POST /auth/refresh` (public) · `POST /auth/logout` · `GET /auth/me` (both roles) |
 | **Change password** | `POST /auth/change-password` (both roles) |
 | **Dashboard** | `GET /dashboard` |
 | **Leads – Kanban board** | `GET /leads?stage=&ownerId=&source=&search=` (full list) · `GET /leads/stats` · `PATCH /leads/:id/stage` (drag & drop; not `WON`) |
 | **Lead form / drawer** | `POST /leads` · `GET /leads/:id` (incl. `stageHistory`) · `PATCH /leads/:id` · `DELETE /leads/:id` · owner picker: `GET /staff?limit=500&isActive=true` |
-| **Lead form – "Client portal access"** | `PATCH /leads/:id/client-access` `{customerId \| null, visibleToClient, showValueToClient}` (the same 3 fields are also accepted by `POST /leads` and `PATCH /leads/:id`) · client picker: `GET /customers?limit=500` |
+| **Lead form – "Client portal access"** | `POST /leads` / `PATCH /leads/:id` with `{customerId \| null, newClient?, visibleToClient, showValueToClient, sendWhatsapp?}` (also `PATCH /leads/:id/client-access`) · client picker: `GET /customers?limit=500` (`contactName · phone`) |
+| **WhatsApp audit** | `GET /whatsapp-messages?leadId=&customerId=&status=` · `POST /whatsapp-messages/:id/retry` |
 | **Deal Won → Convert modal** | `POST /leads/:id/convert` · customer picker: `GET /customers?limit=500` · team picker: `GET /staff?limit=500` |
 | **Projects board** | `GET /projects?stage=&status=running\|closed&search=` (full list) · `PATCH /projects/:id/stage` |
 | **Project detail – overview** | `GET /projects/:id` (progress, `finance`, populated `team`, `engineerCount`/`staffCount`, `stageHistory`) · `PATCH /projects/:id` |
@@ -97,8 +103,9 @@ All routes are prefixed with `/api`. Every route is **ADMIN-only** unless marked
 | **Project detail – client confirmation** | `POST /projects/:id/record-client-approval` (offline approval) |
 | **Project detail – payments** | `GET /projects/:id/payments` · `POST /payments` · `PATCH /payments/:id` · `DELETE /payments/:id` |
 | **Project detail – expenses** | `GET /projects/:id/expenses` · `POST /expenses/batch` · `PATCH /expenses/:id` · `DELETE /expenses/:id` |
+| **Internal projects** | `GET /internal-projects?status=&search=&page=&limit=` · `POST /internal-projects` · `GET/PATCH/DELETE /internal-projects/:id` · `GET /internal-projects/:id/expenses` · costs: `POST /expenses/batch` with `internalProjectId` |
 | **Payments ledger** | `GET /payments?projectId=&from=&to=&page=&limit=` |
-| **Expenses ledger** | `GET /expenses?projectId=&category=&staffId=&from=&to=&page=&limit=` |
+| **Expenses ledger** | `GET /expenses?scope=&projectId=&internalProjectId=&category=&staffId=&from=&to=&page=&limit=` |
 | **Finance** | `GET /finance/summary` · `GET /finance/projects` · `GET /finance/monthly?months=6` · `GET /finance/expenses/by-category` · `GET /finance/expenses/by-user?projectId=&from=&to=` |
 | **Staff** | `GET/POST /staff` · `GET/PATCH/DELETE /staff/:id` |
 | **Customers** | `GET/POST /customers` · `GET/PATCH/DELETE /customers/:id` |
@@ -123,13 +130,15 @@ All routes are prefixed with `/api`. Every route is **ADMIN-only** unless marked
 **Leads**
 - New leads start at `LEAD` (or any given non-`WON` stage). Stages move freely between `LEAD … PENDING` and `CANCELLED`; each change appends `{from,to,by,at}` to `stageHistory` and updates `stageUpdatedAt`.
 - `WON` is reachable **only** via `POST /leads/:id/convert`.
+- `quote` (`{ "PRO": number, "PREMIUM": number }`, both > 0, or `null` if never set) is set via `POST /leads` or `PATCH /leads/:id`. Once set, it cannot be cleared. A lead can't enter `PROPOSAL` without a quote (400). The quote is never shown in the customer portal.
 - Converted leads (`projectId` set) are locked: no stage change (409), no delete (409), and `value` follows the project's contract value.
 - `GET /leads/stats` → `winRate = round(won / total × 100)`.
 
 **Deal Won → Project** (single transaction: `connection.startSession()` + `session.withTransaction`)
-1. Validates `contractValue > 0`, `endDate ≥ startDate`, lead not converted or cancelled, and that every staff id exists.
+1. Validates `plan` (`PRO` | `PREMIUM`, required), `contractValue > 0`, `endDate ≥ startDate`, lead not converted or cancelled, and that every staff id exists.
 2. `customerId: "NEW"` creates a Customer from the lead's company/contact. If the lead has an email and no user owns it, a CUSTOMER login is created with a random temporary password. The invite e-mail is a logged stub (`UsersService.sendInvite`); the response's `invite.temporaryPassword` is included only when `NODE_ENV !== 'production'`.
-3. Creates the Project at `INITIATE` (`dev` all 0, `team = staffIds`), then marks the lead `WON` (`wonAt`, `projectId`, `customerId`, `value = contractValue`), writing a history entry on both.
+3. Creates the Project at `INITIATE` (`dev` all 0, `team = staffIds`, `plan`). `contractValue` is the final price as sent, and is never recomputed from the quote. Projects from before plans existed have `plan: null`. `PATCH /projects/:id` can change it later.
+   It then marks the lead `WON` (`wonAt`, `projectId`, `customerId`, `value = contractValue`), writing a history entry on both.
 4. Any failure rolls back everything (covered by tests). Invite and log side effects happen only after commit.
 
 **My Discussions (client portal)**
@@ -153,7 +162,61 @@ net = received − spent   projected = contract − spent   margin = contract ? 
 
 **Dashboard**: leads = all leads; confirmedLeads = `WON`; projectsRunning = stage ≠ `CLOSED`; projectsOngoing = stage ∉ {`INITIATE`, `CLOSED`}; projectsClosed = `CLOSED`; awaitingClient = `CLIENT_CONFIRMATION`; revenue = Σ payments; booked = Σ contract values; net = revenue − expenses.
 
-**Expenses** are recorded in batches: one project + one staff member + one date, with several category lines. Each line becomes its own `Expense` document (`insertMany` in a transaction).
+**Work status** (admin only, never under `/portal`)
+- `POST /projects/:projectId/work-logs` takes `{ staffId, status?, note?, items: [{ scope, type }] }`. It creates one `WorkLog` per item in a single transaction, and all rows share the same staff member, status (default `IN_PROGRESS`) and note.
+- A `PROJECT` item is stored with the project's id; a `LEAD` item is stored with the project's `leadId`.
+- `staffId` must be on the project's team. Each `type` must be in `WORK_TYPES[scope]` (`src/common/constants/enums.ts`). A request can't repeat the same scope + type, but the same work can be logged again later.
+- `GET /projects/:projectId/work-logs` returns the project's PROJECT logs plus its lead's LEAD logs. `GET /work-logs?staffId=&status=&projectId=&leadId=` returns all logs, filtered. Both are sorted newest `updatedAt` first, and each row includes `targetName` (the project name or lead title).
+- `PATCH /work-logs/:id` takes `{ type?, note?, status? }`, and the type must stay within the row's scope. `DELETE /work-logs/:id` soft-deletes the log.
+- `GET /staff` and `GET /staff/:id` add `currentWork`: every log that isn't `DONE`, newest first.
+- Deleting a staff member or a lead also soft-deletes their logs.
+
+**Client accounts & WhatsApp**
+- Phones are stored normalised: digits with country code, no `+` (`"98765 43210"`, `"+91 98765 43210"` and `"098765-43210"` all become `"919876543210"`; 10-digit numbers get `91`). `Customer.phone` is unique among live customers and may be null. Login, dedupe and the customer API all use the same `normalizePhone`.
+- CUSTOMER login: `{ phone, password, role: "CUSTOMER" }`. The phone finds the customer, and the password picks its CUSTOMER login. Email login still works for customer accounts that have an email. ADMIN logins use email only. Customer logins may have no email.
+- Lead access body on `POST /leads` / `PATCH /leads/:id` (one transaction; omitted fields are left unchanged):
+  - `customerId` links an existing customer. `newClient: { name, phone, email? }` reuses the live customer with that phone, or creates one (company = the lead's company), and gives it a portal login if it has none. Sending both → 400.
+  - `customerId: null` without `newClient` unlinks the lead and turns both flags off. `visibleToClient` without a client is forced off.
+  - `showValueToClient: true` requires `visibleToClient` (400); hiding the lead hides the value too.
+  - The response is the lead, plus `invite: { phone, email, temporaryPassword }` when a login was created (the password is left out in production).
+- Converting: a lead already linked to a client converts for that client. `customerId` may be omitted; a different one → 409. `"NEW"` reuses the customer that already has the lead's phone.
+- `sendWhatsapp: true` requires a linked client with a phone (400 otherwise). After commit, it writes one `whatsapp_messages` row (the outbox and audit trail) and returns `whatsapp: { id, status }`. A worker sends due rows through `WhatsappProvider` (currently a logging stub; bind a real one in `WhatsappModule`). A provider error marks the row `FAILED` and retries it with backoff. Queueing or sending problems never fail the lead save. A new login's temporary password is part of the message and is erased once the row is `SENT` or out of attempts; the API never returns it.
+
+**Deploying the phone-login change:** run `npm run migrate:phone-login` (dry run) and check its report, then `npm run migrate:phone-login -- --apply`. The migration:
+- normalises existing customer phones, and sets `''`, missing or unparseable phones to null;
+- when live customers share a number, keeps it on the oldest one and clears the others (listed in the report, to fix by hand);
+- backs up every changed value to `migration_2026_10_customer_phones`;
+- replaces the old unique `users.email_1` index (it forbids more than one user without an email) and adds the phone index.
+
+Until it runs, creating a second email-less customer login fails with 409. Customers without a phone can't sign in by phone until an admin sets one.
+
+**Expenses** are recorded in batches: one target + an optional staff member + one date, with several category lines. Each line becomes its own `Expense` document (`insertMany` in a transaction). Each expense has a `scope`:
+
+| scope | projectId | internalProjectId | staffId |
+|---|---|---|---|
+| `PROJECT` (client project) | required | empty | required |
+| `INTERNAL_PROJECT` | empty | required | required |
+| `COMPANY` (office, tools, salaries…) | empty | empty | optional |
+| `OWNER` (the owner's own expenses) | empty | empty | optional |
+
+- `POST /expenses/batch` checks the table for the whole batch, and returns 400 with a message naming the field. The model enforces the same rules.
+- A batch without `scope` is inferred from its id: `internalProjectId` → `INTERNAL_PROJECT`, `projectId` → `PROJECT`. With neither, it's a 400.
+- Every expense in a response has `scope`, `projectId`, `internalProjectId` and `staffId` (alias `userId`), with `null` where a field doesn't apply.
+- `PATCH /expenses/:id` with `staffId: null` clears the staff member on `COMPANY` / `OWNER` expenses (400 otherwise).
+- Filters: `GET /expenses?scope=` combines with `projectId`, `internalProjectId`, `category` and `staffId`. `/finance/expenses/by-category` and `/finance/expenses/by-user` accept `?scope=` too.
+- `by-user` groups expenses without a staff member under one entry, `{ userId: null, name: "Unassigned" }`, so its totals still add up to all expenses.
+- Every scope counts as a business expense: in `/finance/summary` (`expenses` and `net`, broken down by `internalExpenses`, `companyExpenses` and `ownerExpenses`), `/finance/monthly`, by-category, by-user, and the dashboard `money`.
+- Only `PROJECT` expenses reach `/finance/projects`, a client project's `finance` block and `projected`. Nothing about expenses is ever exposed under `/portal`.
+
+**Deploying the expense-scope change:** run `npm run migrate:expense-scope` (dry run), then add `-- --apply`. It sets `scope` on older rows (`INTERNAL_PROJECT` if they have an `internalProjectId`, otherwise `PROJECT`) and creates the `{scope, spentOn}` index. The API already reads older rows correctly before the migration runs (their scope is worked out from the ids), so this only makes the data explicit.
+
+**Internal projects** are projects for our own business, with no client, lead, contract or payments.
+- Fields: `name` (required), `description`, `status` (`PLANNED` | `ACTIVE` (default) | `ON_HOLD` | `COMPLETED`), `budget` (≥ 0, nullable), `startDate` ≤ `endDate` (both optional, `YYYY-MM-DD`).
+- Responses add `spent`, the sum of the project's expenses.
+- Deleting one soft-deletes it together with its expenses, in one transaction.
+- Their costs are ordinary expenses, so they count in `/finance/summary` (`expenses`, `net`, plus an `internalExpenses` breakdown), `/finance/monthly`, `/finance/expenses/by-category`, `/finance/expenses/by-user`, and the dashboard `money.expenses` / `money.net`.
+- They are kept out of `/finance/projects`, a client project's `finance` block, `projected` (contract − client-project spend), and everything under `/portal`.
+- No data migration is needed: existing expenses keep their `projectId`, and a missing `internalProjectId` counts as null.
 
 ---
 
@@ -167,7 +230,7 @@ net = received − spent   projected = contract − spent   margin = contract ? 
 
 ## Data model notes
 - **Soft delete** (`src/common/plugins/soft-delete.plugin.ts`): adds `deletedAt`; filters `find`, `findOne`, `findOneAndUpdate`, `countDocuments`, `updateOne`, `updateMany` and prepends a `$match` to `aggregate()` unless `{ withDeleted: true }` is set; adds `softDelete(id)` / `restore(id)` statics. `$lookup` sub-pipelines filter `deletedAt: null` explicitly.
-- Indexes: Lead `{stage,createdAt}`, `{ownerId,createdAt}`, `{createdAt}`, `{customerId,visibleToClient,stage}`, `{projectId}` unique sparse, text `{title,company,contactName}`; Project `{stage}`, `{customerId,stage}`, `leadId` unique, text `{name}`; Payment `{projectId,paidOn}`, `{paidOn}`; Expense `{projectId,spentOn}`, `{category,spentOn}`, `{staffId,spentOn}`, `{spentOn}`; User `email` unique. Board search uses an escaped case-insensitive regex (partial-word "contains" matching, which `$text` cannot do); the text indexes are in place for full-text search.
+- Indexes: Lead `{stage,createdAt}`, `{ownerId,createdAt}`, `{createdAt}`, `{customerId,visibleToClient,stage}`, `{projectId}` unique sparse, text `{title,company,contactName}`; Project `{stage}`, `{customerId,stage}`, `leadId` unique, text `{name}`; Payment `{projectId,paidOn}`, `{paidOn}`; Expense `{projectId,spentOn}`, `{internalProjectId,spentOn}` (partial), `{scope,spentOn}`, `{category,spentOn}`, `{staffId,spentOn}`, `{spentOn}`; User `email` unique when set (partial); Customer `phone` unique among live customers (partial); WhatsappMessage `{status,nextAttemptAt}`, `{leadId,createdAt}`, `{customerId,createdAt}`. Board search uses an escaped case-insensitive regex (partial-word "contains" matching, which `$text` cannot do); the text indexes are in place for full-text search.
 - Soft-deleted users keep their unique email; reusing it returns 409.
 
 ## Project layout
@@ -177,13 +240,14 @@ src/
   config/            env validation (class-validator)
   common/            constants (enums) · decorators (@Public, @Roles, @CurrentUser) · guards · filters ·
                      interceptors · pipes (ParseObjectIdPipe) · plugins (softDelete, toJSON) · schemas · dto · utils
-  auth/ users/ customers/ staff/ leads/ projects/ payments/ expenses/ finance/ dashboard/ portal/
+  auth/ users/ customers/ staff/ leads/ projects/ payments/ expenses/ finance/ dashboard/ portal/ work-logs/ whatsapp/ internal-projects/
                      each: schemas/ · dto/ · *.controller.ts · *.service.ts · *.module.ts · *.mapper.ts
-test/                e2e suites (leads/convert, finance, portal, auth) + in-memory replica-set setup
+  migrations/        one-off data migrations (dry run by default)
+test/                e2e suites (leads/convert, finance, portal, discussions, auth, work logs, client accounts & WhatsApp, phone migration, internal projects, expense scopes) + in-memory replica-set setup
 ```
 
 ## Tests
-`npm test` runs 92 tests against a real MongoDB in-memory **replica set** (so transactions are exercised):
+`npm test` runs 142 tests against a real MongoDB in-memory **replica set** (so transactions are exercised):
 - `project-progress.spec.ts`: progress formula for every stage
 - `finance.util.spec.ts`: finance formulas
 - `soft-delete.plugin.spec.ts`: query and aggregate filtering, `withDeleted`, `softDelete`/`restore`, `toJSON`

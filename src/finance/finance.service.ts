@@ -1,13 +1,14 @@
 import { Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import type { FilterQuery, PipelineStage } from 'mongoose';
-import type { ExpenseCategory, ProjectStage } from '../common/constants/enums';
+import type { ExpenseCategory, ExpenseScope, ProjectStage } from '../common/constants/enums';
 import type { SoftDeleteModel } from '../common/plugins/soft-delete.plugin';
 import { monthKey, startOfUtcMonth } from '../common/utils/date.util';
 import { dateRange } from '../common/utils/date-range.util';
 import { round2 } from '../common/utils/money.util';
 import { idOf, toObjectId } from '../common/utils/object-id.util';
 import { Customer } from '../customers/schemas/customer.schema';
+import { SCOPE_EXPR, scopeFilter } from '../expenses/expense-scope';
 import { Expense } from '../expenses/schemas/expense.schema';
 import { Payment } from '../payments/schemas/payment.schema';
 import { Project } from '../projects/schemas/project.schema';
@@ -27,8 +28,15 @@ export interface FinanceSummary {
   contractValue: number;
   received: number;
   pending: number;
+  /** All business expenses: client projects + internal projects + company + owner. */
   expenses: number;
+  /** Parts of `expenses` that belong to no client project. */
+  internalExpenses: number;
+  companyExpenses: number;
+  ownerExpenses: number;
+  /** received − expenses. */
   net: number;
+  /** Client projects only: contract value − client-project expenses. */
   projected: number;
 }
 
@@ -45,7 +53,8 @@ export interface CategoryTotal {
 }
 
 export interface UserExpenseBreakdown {
-  userId: string;
+  /** null groups expenses without a staff member (COMPANY / OWNER), named "Unassigned". */
+  userId: string | null;
   name: string | null;
   role: string | null;
   type: string | null;
@@ -143,6 +152,10 @@ export class FinanceService {
   }
 
   async summary(): Promise<FinanceSummary> {
+    const byScope = this.expenseModel.aggregate<{ _id: ExpenseScope; total: number }>([
+      { $match: { $expr: { $ne: [SCOPE_EXPR, 'PROJECT'] } } },
+      { $group: { _id: SCOPE_EXPR, total: { $sum: '$amount' } } },
+    ]);
     const [row] = await this.projectModel.aggregate<{
       contract: number;
       received: number;
@@ -163,17 +176,26 @@ export class FinanceService {
     const contract = round2(row?.contract ?? 0);
     const received = round2(row?.received ?? 0);
     const spent = round2(row?.spent ?? 0);
+    const other = new Map((await byScope).map((r) => [r._id, round2(r.total)]));
+    const internalExpenses = other.get('INTERNAL_PROJECT') ?? 0;
+    const companyExpenses = other.get('COMPANY') ?? 0;
+    const ownerExpenses = other.get('OWNER') ?? 0;
+    // Client-project spend comes from the per-project pipeline (same basis as `projected`).
+    const expenses = round2(spent + internalExpenses + companyExpenses + ownerExpenses);
     return {
       contractValue: contract,
       received,
       pending: round2(row?.pending ?? 0),
-      expenses: spent,
-      net: round2(received - spent),
+      expenses,
+      internalExpenses,
+      companyExpenses,
+      ownerExpenses,
+      net: round2(received - expenses),
       projected: round2(contract - spent),
     };
   }
 
-  /** Total payments received / contract value booked / expenses, across all projects. */
+  /** Total payments received / contract value booked / expenses (every scope). */
   async totals(): Promise<{ revenue: number; booked: number; expenses: number }> {
     const sumOf = (field: string): PipelineStage[] => [
       { $group: { _id: null, total: { $sum: `$${field}` } } },
@@ -216,7 +238,7 @@ export class FinanceService {
   }
 
   private expenseMatch(q: ExpenseBreakdownQueryDto & { category?: ExpenseCategory }) {
-    const match: Record<string, unknown> = {};
+    const match: Record<string, unknown> = q.scope ? scopeFilter(q.scope) : {};
     if (q.projectId) match.projectId = toObjectId(q.projectId);
     if (q.category) match.category = q.category;
     const range = dateRange(q.from, q.to);
@@ -271,8 +293,8 @@ export class FinanceService {
       { $sort: { total: -1, 'staff.name': 1 } },
     ]);
     return rows.map((r) => ({
-      userId: idOf(r._id as string)!,
-      name: r.staff?.name ?? null,
+      userId: idOf(r._id as string),
+      name: r._id ? (r.staff?.name ?? null) : 'Unassigned',
       role: r.staff?.role ?? null,
       type: r.staff?.type ?? null,
       total: round2(r.total),

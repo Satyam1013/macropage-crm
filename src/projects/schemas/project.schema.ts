@@ -1,6 +1,11 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument, Schema as MongooseSchema, Types } from 'mongoose';
-import { PROJECT_STAGES, ProjectStage } from '../../common/constants/enums';
+import {
+  PROJECT_PLANS,
+  PROJECT_STAGES,
+  ProjectPlan,
+  ProjectStage,
+} from '../../common/constants/enums';
 import { BaseEntity } from '../../common/schemas/base.entity';
 import { applyCommonPlugins } from '../../common/schemas/apply-plugins';
 import {
@@ -53,6 +58,10 @@ export class Project extends BaseEntity {
 
   @Prop({ type: Number, required: true, min: 0 })
   contractValue: number;
+
+  /** Plan chosen on Deal Won; null for projects converted before plans existed. */
+  @Prop({ type: String, enum: [...PROJECT_PLANS, null], default: null })
+  plan?: ProjectPlan | null;
 
   @Prop({ type: DevProgressSchema, default: () => ({}) })
   dev: DevProgress;

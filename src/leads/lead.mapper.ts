@@ -1,4 +1,4 @@
-import type { LeadStage } from '../common/constants/enums';
+import type { LeadStage, ProjectPlan } from '../common/constants/enums';
 import { toDateOnly, toIso } from '../common/utils/date.util';
 import { idOf } from '../common/utils/object-id.util';
 import { StageHistoryResponse, toStageHistory } from '../projects/project.mapper';
@@ -13,6 +13,8 @@ export interface LeadResponse {
   email: string;
   source: string;
   value: number;
+  /** Price per plan; null until a quotation is sent. */
+  quote: Record<ProjectPlan, number> | null;
   /** Staff id of the lead owner. */
   owner: string | null;
   stage: LeadStage;
@@ -41,6 +43,7 @@ export function toLeadResponse(l: Lead): LeadResponse {
     email: l.email ?? '',
     source: l.source ?? '',
     value: l.value ?? 0,
+    quote: l.quote ? { PRO: l.quote.PRO, PREMIUM: l.quote.PREMIUM } : null,
     owner: idOf(l.ownerId),
     stage: l.stage,
     expectedClose: toDateOnly(l.expectedClose),

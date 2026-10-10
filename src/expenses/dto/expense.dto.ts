@@ -11,7 +11,12 @@ import {
   MaxLength,
   ValidateNested,
 } from 'class-validator';
-import { EXPENSE_CATEGORIES, ExpenseCategory } from '../../common/constants/enums';
+import {
+  EXPENSE_CATEGORIES,
+  EXPENSE_SCOPES,
+  ExpenseCategory,
+  ExpenseScope,
+} from '../../common/constants/enums';
 import { PaginationQueryDto } from '../../common/dto/pagination.dto';
 import { Alias, IsDateOnly, IsMoney } from '../../common/dto/validators';
 
@@ -30,15 +35,36 @@ export class ExpenseLineDto {
   note?: string;
 }
 
-/** One project + one staff member + one date, with several category lines. */
+/**
+ * One target (scope + its ids) + optional staff member + one date, with several category lines.
+ * The scope's id rules (see expenseScopeError) apply to the whole batch.
+ */
 export class CreateExpenseBatchDto {
-  @IsMongoId()
-  projectId: string;
+  /** Inferred when omitted: internalProjectId → INTERNAL_PROJECT, projectId → PROJECT. */
+  @ApiPropertyOptional({ enum: EXPENSE_SCOPES })
+  @IsOptional()
+  @IsIn(EXPENSE_SCOPES)
+  scope?: ExpenseScope;
 
-  /** Staff member the expenses belong to (`userId` accepted as an alias). */
-  @Alias('userId')
+  @ApiPropertyOptional({ description: 'Required for PROJECT, otherwise empty' })
+  @IsOptional()
   @IsMongoId()
-  staffId: string;
+  projectId?: string;
+
+  @ApiPropertyOptional({ description: 'Required for INTERNAL_PROJECT, otherwise empty' })
+  @IsOptional()
+  @IsMongoId()
+  internalProjectId?: string;
+
+  /**
+   * Staff member the expenses belong to (`userId` accepted as an alias). Required for PROJECT
+   * and INTERNAL_PROJECT, optional for COMPANY and OWNER.
+   */
+  @ApiPropertyOptional()
+  @Alias('userId')
+  @IsOptional()
+  @IsMongoId()
+  staffId?: string;
 
   @ApiProperty({ example: '2026-10-05' })
   @Alias('date')
@@ -71,11 +97,12 @@ export class UpdateExpenseDto {
   @IsDateOnly()
   spentOn?: string;
 
-  @ApiPropertyOptional()
+  /** null clears it (COMPANY / OWNER expenses only). */
+  @ApiPropertyOptional({ nullable: true, type: String })
   @IsOptional()
-  @Alias('userId')
+  @Alias('userId', { keepNull: true })
   @IsMongoId()
-  staffId?: string;
+  staffId?: string | null;
 
   @IsOptional()
   @IsString()
@@ -88,6 +115,16 @@ export class ListExpensesQueryDto extends PaginationQueryDto {
   @IsOptional()
   @IsMongoId()
   projectId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsMongoId()
+  internalProjectId?: string;
+
+  @ApiPropertyOptional({ enum: EXPENSE_SCOPES })
+  @IsOptional()
+  @IsIn(EXPENSE_SCOPES)
+  scope?: ExpenseScope;
 
   @ApiPropertyOptional({ enum: EXPENSE_CATEGORIES })
   @IsOptional()

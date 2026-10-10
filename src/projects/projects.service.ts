@@ -125,6 +125,7 @@ export class ProjectsService {
     project.startDate = startDate;
     project.endDate = endDate;
     if (dto.contractValue !== undefined) project.contractValue = dto.contractValue;
+    if (dto.plan !== undefined) project.plan = dto.plan;
     await project.save();
 
     if (dto.contractValue !== undefined) {

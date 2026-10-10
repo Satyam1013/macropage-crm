@@ -42,6 +42,25 @@ export class UsersService {
       .exec();
   }
 
+  /** Live CUSTOMER logins of the live customer that owns this (normalised) phone. */
+  async findCustomerLoginsByPhoneWithSecrets(phone: string): Promise<UserDocument[]> {
+    const customer = await this.customerModel.findOne({ phone }).select('_id').lean();
+    if (!customer) return [];
+    return this.userModel
+      .find({ role: 'CUSTOMER', customerId: customer._id })
+      .select('+passwordHash +refreshTokenHash')
+      .sort({ createdAt: 1 })
+      .exec();
+  }
+
+  /** Whether the customer already has a portal login. */
+  async customerHasLogin(customerId: string, session?: ClientSession): Promise<boolean> {
+    const count = await this.userModel
+      .countDocuments({ role: 'CUSTOMER', customerId })
+      .session(session ?? null);
+    return count > 0;
+  }
+
   findByIdWithSecrets(id: string): Promise<UserDocument | null> {
     return this.userModel.findById(id).select('+passwordHash +refreshTokenHash').exec();
   }
@@ -124,7 +143,7 @@ export class UsersService {
       isActive: dto.isActive ?? true,
       passwordHash: await this.hashPassword(password),
     });
-    this.logger.log(`User created: ${created.email} (${created.role})`);
+    this.logger.log(`User created: ${created.email ?? created.id} (${created.role})`);
     const response = await this.get(created.id);
     return dto.password ? response : { ...response, temporaryPassword: password };
   }
@@ -142,7 +161,7 @@ export class UsersService {
       await this.assertCustomerExists(dto.customerId);
       user.customerId = dto.customerId as never;
     }
-    if (dto.email !== undefined && dto.email.toLowerCase() !== user.email) {
+    if (dto.email !== undefined && dto.email.toLowerCase() !== (user.email ?? '')) {
       if (await this.emailExists(dto.email)) {
         throw new ConflictException('A user with this email already exists');
       }
@@ -162,7 +181,7 @@ export class UsersService {
     if (!user) throw new NotFoundException('User not found');
     const password = dto.password ?? generateTemporaryPassword();
     await this.setPassword(id, password);
-    this.logger.log(`Password reset for ${user.email}`);
+    this.logger.log(`Password reset for ${user.email ?? user.id}`);
     return dto.password
       ? { message: 'Password updated' }
       : { message: 'Password reset', temporaryPassword: password };
@@ -180,9 +199,9 @@ export class UsersService {
     return new Map(users.map((u) => [u._id.toHexString(), u.name]));
   }
 
-  /** Creates a CUSTOMER login inside the caller's transaction. */
+  /** Creates a CUSTOMER login inside the caller's transaction. Email is optional (phone login). */
   async createCustomerLogin(
-    data: { name: string; email: string; customerId: string },
+    data: { name: string; email: string | null; customerId: string },
     password: string,
     session: ClientSession,
   ): Promise<UserDocument> {

@@ -1,5 +1,6 @@
 import { toIso } from '../common/utils/date.util';
 import { idOf } from '../common/utils/object-id.util';
+import type { CurrentWorkResponse } from '../work-logs/work-log.mapper';
 import type { Staff } from './schemas/staff.schema';
 
 export interface StaffResponse {
@@ -12,6 +13,11 @@ export interface StaffResponse {
   isActive: boolean;
   createdAt: string | null;
   updatedAt: string | null;
+}
+
+export interface StaffWithWorkResponse extends StaffResponse {
+  /** Every non-DONE work log, newest first. */
+  currentWork: CurrentWorkResponse[];
 }
 
 export function toStaffResponse(s: Staff): StaffResponse {

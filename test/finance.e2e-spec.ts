@@ -84,6 +84,9 @@ describe('Finance aggregations', () => {
       received: 130000,
       pending: 30000,
       expenses: 85000,
+      internalExpenses: 0,
+      companyExpenses: 0,
+      ownerExpenses: 0,
       net: 45000,
       projected: 65000,
     });

@@ -7,6 +7,7 @@ export interface CustomerResponse {
   name: string;
   contactName: string;
   email: string;
+  /** Digits with country code, e.g. "919876543210"; '' when not set. */
   phone: string;
   address: string | null;
   createdAt: string | null;

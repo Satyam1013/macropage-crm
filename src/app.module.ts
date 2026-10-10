@@ -12,12 +12,15 @@ import { DashboardModule } from './dashboard/dashboard.module';
 import { ExpensesModule } from './expenses/expenses.module';
 import { FinanceModule } from './finance/finance.module';
 import { HealthController } from './health.controller';
+import { InternalProjectsModule } from './internal-projects/internal-projects.module';
 import { LeadsModule } from './leads/leads.module';
 import { PaymentsModule } from './payments/payments.module';
 import { PortalModule } from './portal/portal.module';
 import { ProjectsModule } from './projects/projects.module';
 import { StaffModule } from './staff/staff.module';
 import { UsersModule } from './users/users.module';
+import { WhatsappModule } from './whatsapp/whatsapp.module';
+import { WorkLogsModule } from './work-logs/work-logs.module';
 
 @Module({
   imports: [
@@ -59,6 +62,9 @@ import { UsersModule } from './users/users.module';
     FinanceModule,
     DashboardModule,
     PortalModule,
+    WorkLogsModule,
+    WhatsappModule,
+    InternalProjectsModule,
   ],
   controllers: [HealthController],
   providers: [

@@ -8,6 +8,17 @@ import {
   StageHistoryEntrySchema,
 } from '../../common/schemas/stage-history.schema';
 
+/** One price per plan, entered when the lead reaches PROPOSAL. */
+@Schema({ _id: false })
+export class LeadQuote {
+  @Prop({ type: Number, required: true, min: 0 })
+  PRO: number;
+
+  @Prop({ type: Number, required: true, min: 0 })
+  PREMIUM: number;
+}
+export const LeadQuoteSchema = SchemaFactory.createForClass(LeadQuote);
+
 @Schema({ timestamps: true, collection: 'leads' })
 export class Lead extends BaseEntity {
   @Prop({ required: true, trim: true })
@@ -36,6 +47,10 @@ export class Lead extends BaseEntity {
 
   @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Staff', required: true })
   ownerId: Types.ObjectId;
+
+  /** Null until a quotation is sent; required to enter PROPOSAL. */
+  @Prop({ type: LeadQuoteSchema, default: null })
+  quote?: LeadQuote | null;
 
   @Prop({ type: Date, default: null })
   expectedClose?: Date | null;

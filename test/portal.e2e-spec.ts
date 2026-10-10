@@ -63,6 +63,7 @@ describe('Client portal: data isolation & client confirmation', () => {
       name: 'Alpha Shop',
       stage: 'IN_PROGRESS',
       contractValue: 100000,
+      plan: 'PREMIUM',
     });
     aliceAwaiting = await makeProject(ctx, {
       ...base,
@@ -95,7 +96,10 @@ describe('Client portal: data isolation & client confirmation', () => {
       balance: 75000,
       progress: 39,
       clientName: 'Alpha Corp',
+      plan: 'PREMIUM',
     });
+    // Projects converted before plans existed report null.
+    expect(res.body.find((p: { id: string }) => p.id === aliceAwaiting).plan).toBeNull();
     const keys = collectKeys(res.body);
     for (const k of FORBIDDEN_KEYS) expect(keys).not.toContain(k);
 
@@ -117,6 +121,7 @@ describe('Client portal: data isolation & client confirmation', () => {
     ]);
     expect(res.body.timeline).toEqual([{ from: null, to: 'IN_PROGRESS', at: expect.any(String) }]);
     expect(res.body.requirements).toBe('reqs');
+    expect(res.body.plan).toBe('PREMIUM');
     const keys = collectKeys(res.body);
     for (const k of [...FORBIDDEN_KEYS, 'by', 'email', 'phone', 'type'])
       expect(keys).not.toContain(k);
