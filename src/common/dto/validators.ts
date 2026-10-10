@@ -2,6 +2,7 @@ import { applyDecorators } from '@nestjs/common';
 import { Expose, Transform } from 'class-transformer';
 import { IsNumber, Max, Min, registerDecorator, ValidationOptions } from 'class-validator';
 import { isValidDateOnly } from '../utils/date.util';
+import { normalizePhone } from '../utils/phone.util';
 import { round2 } from '../utils/money.util';
 
 /** `YYYY-MM-DD` (an ISO timestamp is also accepted; only its date part is kept). */
@@ -40,14 +41,42 @@ export function IsMoney(opts: { positive?: boolean } = {}): PropertyDecorator {
  * Lets a DTO property also be populated from an alias key (e.g. the frontend's `owner` for
  * `ownerId`, or `date` for `paidOn`). The canonical key wins when both are sent.
  */
-export function Alias(alias: string): PropertyDecorator {
+export function Alias(alias: string, opts: { keepNull?: boolean } = {}): PropertyDecorator {
   return applyDecorators(
     // Without @Expose, class-transformer skips keys absent from the payload, so the
     // transform would never see a request that only carries the alias.
     Expose(),
-    Transform(({ value, obj }) => value ?? (obj as Record<string, unknown>)[alias], {
-      toClassOnly: true,
+    Transform(
+      ({ value, obj }) => {
+        // By default an explicit null counts as absent; `keepNull` lets null clear a field.
+        const given = opts.keepNull ? value !== undefined : value !== undefined && value !== null;
+        return given ? value : (obj as Record<string, unknown>)[alias];
+      },
+      { toClassOnly: true },
+    ),
+  );
+}
+
+/**
+ * Phone number, normalised to digits with country code (see normalizePhone). '' becomes null so
+ * that an optional field can be cleared; combine with @IsOptional() for that.
+ */
+export function IsPhone(): PropertyDecorator {
+  return applyDecorators(
+    Transform(({ value }) => {
+      if (typeof value === 'string' && value.trim() === '') return null;
+      return normalizePhone(value) ?? value;
     }),
+    (target: object, propertyName: string | symbol) =>
+      registerDecorator({
+        name: 'isPhone',
+        target: target.constructor,
+        propertyName: propertyName as string,
+        options: {
+          message: `${String(propertyName)} must be a valid phone number (e.g. 9876543210 or +91 98765 43210)`,
+        },
+        validator: { validate: (value: unknown) => normalizePhone(value) === value },
+      }),
   );
 }
 

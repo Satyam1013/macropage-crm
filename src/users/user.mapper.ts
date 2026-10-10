@@ -5,7 +5,7 @@ import type { User } from './schemas/user.schema';
 export interface UserResponse {
   id: string;
   name: string;
-  email: string;
+  email: string | null;
   role: User['role'];
   customerId: string | null;
   customerName?: string | null;
@@ -19,7 +19,7 @@ export function toUserResponse(user: User, customerName?: string | null): UserRe
   const out: UserResponse = {
     id: idOf(user._id)!,
     name: user.name,
-    email: user.email,
+    email: user.email ?? null,
     role: user.role,
     customerId: idOf(user.customerId),
     isActive: user.isActive,

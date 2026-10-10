@@ -1,7 +1,7 @@
 import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import type { FilterQuery } from 'mongoose';
-import { PaymentMode, PROJECT_STAGES, ProjectStage } from '../common/constants/enums';
+import { PaymentMode, PROJECT_STAGES, ProjectPlan, ProjectStage } from '../common/constants/enums';
 import type { AuthUser } from '../common/decorators/current-user.decorator';
 import type { SoftDeleteModel } from '../common/plugins/soft-delete.plugin';
 import { toDateOnly, toIso } from '../common/utils/date.util';
@@ -34,6 +34,7 @@ export interface PortalProjectSummary {
   awaitingApproval: boolean;
   closedAt: string | null;
   contractValue: number;
+  plan: ProjectPlan | null;
   paid: number;
   balance: number;
 }
@@ -218,6 +219,7 @@ export class PortalService {
       awaitingApproval: p.stage === 'CLIENT_CONFIRMATION',
       closedAt: toIso(p.closedAt),
       contractValue: p.contractValue,
+      plan: p.plan ?? null,
       paid,
       balance: round2(Math.max(p.contractValue - paid, 0)),
     };

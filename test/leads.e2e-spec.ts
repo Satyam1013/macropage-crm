@@ -52,6 +52,7 @@ describe('Leads: stage rules & Deal Won → Project conversion', () => {
 
   const convertBody = (overrides: Record<string, unknown> = {}) => ({
     contractValue: 250000,
+    plan: 'PREMIUM',
     startDate: '2026-11-01',
     endDate: '2027-01-31',
     customerId: 'NEW',
@@ -76,7 +77,7 @@ describe('Leads: stage rules & Deal Won → Project conversion', () => {
     });
 
     it('moves freely forward/backward and to CANCELLED, recording history and stageUpdatedAt', async () => {
-      const lead = await createLead();
+      const lead = await createLead({ quote: { PRO: 80000, PREMIUM: 100000 } });
       for (const stage of ['PROPOSAL', 'QUALIFIED', 'CANCELLED', 'DEMO']) {
         const res = await ctx
           .http()
@@ -168,6 +169,67 @@ describe('Leads: stage rules & Deal Won → Project conversion', () => {
       expect(moved.body.owner).toBe(fx.engineerId);
     });
 
+    it('stores, validates and returns the quote', async () => {
+      const lead = await createLead();
+      expect(lead).toMatchObject({ quote: null });
+
+      for (const quote of [
+        { PRO: 25000 },
+        { PRO: 0, PREMIUM: 40000 },
+        { PRO: 25000, PREMIUM: -1 },
+        { PRO: 'abc', PREMIUM: 40000 },
+        null,
+        'cheap',
+      ]) {
+        await ctx.http().patch(`/api/leads/${lead.id}`).set(admin).send({ quote }).expect(400);
+      }
+
+      const res = await ctx
+        .http()
+        .patch(`/api/leads/${lead.id}`)
+        .set(admin)
+        .send({ quote: { PRO: 25000, PREMIUM: '40000.456' } })
+        .expect(200);
+      expect(res.body.quote).toEqual({ PRO: 25000, PREMIUM: 40000.46 });
+      // Unrelated PATCHes keep it.
+      await ctx.http().patch(`/api/leads/${lead.id}`).set(admin).send({ notes: 'x' }).expect(200);
+      const list = await ctx.http().get('/api/leads').set(admin).expect(200);
+      expect(list.body[0].quote).toEqual({ PRO: 25000, PREMIUM: 40000.46 });
+
+      const created = await createLead({ title: 'Q', quote: { PRO: 1, PREMIUM: 2 } });
+      expect((created as unknown as { quote: unknown }).quote).toEqual({ PRO: 1, PREMIUM: 2 });
+    });
+
+    it('requires a quote to enter PROPOSAL', async () => {
+      const lead = await createLead();
+      const res = await ctx
+        .http()
+        .patch(`/api/leads/${lead.id}/stage`)
+        .set(admin)
+        .send({ stage: 'PROPOSAL' })
+        .expect(400);
+      expect(res.body.message).toMatch(/quote/);
+      await ctx
+        .http()
+        .post('/api/leads')
+        .set(admin)
+        .send({ title: 't', company: 'c', ownerId: fx.staffMemberId, stage: 'PROPOSAL' })
+        .expect(400);
+
+      await ctx
+        .http()
+        .patch(`/api/leads/${lead.id}`)
+        .set(admin)
+        .send({ quote: { PRO: 25000, PREMIUM: 40000 } })
+        .expect(200);
+      await ctx
+        .http()
+        .patch(`/api/leads/${lead.id}/stage`)
+        .set(admin)
+        .send({ stage: 'PROPOSAL' })
+        .expect(200);
+    });
+
     it('soft-deletes unconverted leads', async () => {
       const lead = await createLead();
       await ctx.http().delete(`/api/leads/${lead.id}`).set(admin).expect(200);
@@ -212,6 +274,45 @@ describe('Leads: stage rules & Deal Won → Project conversion', () => {
   });
 
   describe('POST /leads/:id/convert', () => {
+    it('requires a valid plan and stores it on the project as given', async () => {
+      const lead = await createLead({ quote: { PRO: 200000, PREMIUM: 300000 } });
+      const body = convertBody({ customerId: fx.customerA });
+      const { plan: _omit, ...withoutPlan } = body;
+      for (const bad of [withoutPlan, { ...body, plan: 'BASIC' }, { ...body, plan: null }]) {
+        await ctx.http().post(`/api/leads/${lead.id}/convert`).set(admin).send(bad).expect(400);
+      }
+
+      // contractValue is the final price; it is not recomputed from the quote.
+      const res = await ctx
+        .http()
+        .post(`/api/leads/${lead.id}/convert`)
+        .set(admin)
+        .send({ ...body, plan: 'PRO', contractValue: 190000 })
+        .expect(201);
+      expect(res.body).toMatchObject({ plan: 'PRO', contractValue: 190000 });
+
+      const detail = await ctx.http().get(`/api/projects/${res.body.id}`).set(admin).expect(200);
+      expect(detail.body.plan).toBe('PRO');
+      const list = await ctx.http().get('/api/projects').set(admin).expect(200);
+      expect(list.body).toEqual(
+        expect.arrayContaining([expect.objectContaining({ id: res.body.id, plan: 'PRO' })]),
+      );
+
+      const edited = await ctx
+        .http()
+        .patch(`/api/projects/${res.body.id}`)
+        .set(admin)
+        .send({ plan: 'PREMIUM' })
+        .expect(200);
+      expect(edited.body.plan).toBe('PREMIUM');
+      await ctx
+        .http()
+        .patch(`/api/projects/${res.body.id}`)
+        .set(admin)
+        .send({ plan: 'BASIC' })
+        .expect(400);
+    });
+
     it('creates customer, customer login and project; marks the lead WON and locks it', async () => {
       const lead = await createLead();
       const res = await ctx
@@ -229,6 +330,7 @@ describe('Leads: stage rules & Deal Won → Project conversion', () => {
         startDate: '2026-11-01',
         endDate: '2027-01-31',
         contractValue: 250000,
+        plan: 'PREMIUM',
         dev: { requirement: 0, ui: 0, frontend: 0, backend: 0 },
         team: [fx.engineerId, fx.staffMemberId],
         clientApproved: false,
@@ -236,6 +338,7 @@ describe('Leads: stage rules & Deal Won → Project conversion', () => {
       });
       // Temporary password is exposed outside production only.
       expect(project.invite).toEqual({
+        phone: '919000000000',
         email: 'gita@gamma.test',
         temporaryPassword: expect.any(String),
       });
@@ -313,7 +416,7 @@ describe('Leads: stage rules & Deal Won → Project conversion', () => {
       );
     });
 
-    it('skips the login when a user with the lead email already exists', async () => {
+    it('creates a phone-only login when the lead email already belongs to a user', async () => {
       const lead = await createLead({ email: 'alice@alpha.test' });
       const res = await ctx
         .http()
@@ -321,10 +424,86 @@ describe('Leads: stage rules & Deal Won → Project conversion', () => {
         .set(admin)
         .send(convertBody())
         .expect(201);
-      expect(res.body.invite).toBeUndefined();
+      expect(res.body.invite).toEqual({
+        phone: '919000000000',
+        email: null,
+        temporaryPassword: expect.any(String),
+      });
       expect(await ctx.model<User>(User.name).countDocuments({ email: 'alice@alpha.test' })).toBe(
         1,
       );
+      await ctx
+        .http()
+        .post('/api/auth/login')
+        .send({
+          phone: '90000 00000',
+          password: res.body.invite.temporaryPassword,
+          role: 'CUSTOMER',
+        })
+        .expect(200);
+    });
+
+    it('skips the login when the lead has neither a usable phone nor a free email', async () => {
+      const lead = await createLead({ email: 'alice@alpha.test', phone: 'n/a' });
+      const res = await ctx
+        .http()
+        .post(`/api/leads/${lead.id}/convert`)
+        .set(admin)
+        .send(convertBody())
+        .expect(201);
+      expect(res.body.invite).toBeUndefined();
+    });
+
+    it('NEW reuses the customer that already has the lead phone', async () => {
+      await ctx
+        .http()
+        .patch(`/api/customers/${fx.customerA}`)
+        .set(admin)
+        .send({ phone: '+91 90000 00000' })
+        .expect(200);
+      const lead = await createLead();
+      const res = await ctx
+        .http()
+        .post(`/api/leads/${lead.id}/convert`)
+        .set(admin)
+        .send(convertBody())
+        .expect(201);
+      expect(res.body).toMatchObject({ customerId: fx.customerA, clientName: 'Alpha Corp' });
+    });
+
+    it('converts a linked lead for its own customer only', async () => {
+      const lead = await createLead({ customerId: fx.customerA });
+      const { customerId: _omit, ...withoutCustomer } = convertBody();
+      await ctx
+        .http()
+        .post(`/api/leads/${lead.id}/convert`)
+        .set(admin)
+        .send({ ...withoutCustomer, customerId: fx.customerB })
+        .expect(409);
+      await ctx
+        .http()
+        .post(`/api/leads/${lead.id}/convert`)
+        .set(admin)
+        .send({ ...withoutCustomer, customerId: 'NEW' })
+        .expect(409);
+      const res = await ctx
+        .http()
+        .post(`/api/leads/${lead.id}/convert`)
+        .set(admin)
+        .send(withoutCustomer)
+        .expect(201);
+      expect(res.body.customerId).toBe(fx.customerA);
+    });
+
+    it('requires customerId for a lead without a client', async () => {
+      const lead = await createLead();
+      const { customerId: _omit, ...withoutCustomer } = convertBody();
+      await ctx
+        .http()
+        .post(`/api/leads/${lead.id}/convert`)
+        .set(admin)
+        .send(withoutCustomer)
+        .expect(400);
     });
 
     it.each([

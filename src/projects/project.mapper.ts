@@ -1,4 +1,4 @@
-import type { ProjectStage } from '../common/constants/enums';
+import type { ProjectPlan, ProjectStage } from '../common/constants/enums';
 import { toDateOnly, toIso } from '../common/utils/date.util';
 import { idOf } from '../common/utils/object-id.util';
 import { computeProgress, DevTracks } from './project-progress';
@@ -16,6 +16,7 @@ export interface ProjectResponse {
   startDate: string | null;
   endDate: string | null;
   contractValue: number;
+  plan: ProjectPlan | null;
   dev: DevTracks;
   team: string[];
   clientApproved: boolean;
@@ -55,6 +56,7 @@ export function toProjectResponse(p: Project, clientName: string | null = null):
     startDate: toDateOnly(p.startDate),
     endDate: toDateOnly(p.endDate),
     contractValue: p.contractValue,
+    plan: p.plan ?? null,
     dev: toDev(p.dev),
     team: (p.team ?? []).map((t) => idOf(t)!),
     clientApproved: !!p.clientApproved,

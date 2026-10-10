@@ -5,7 +5,7 @@ import type { Role } from '../constants/enums';
 /** The authenticated principal attached to the request by JwtStrategy. */
 export interface AuthUser {
   id: string;
-  email: string;
+  email: string | null;
   name: string;
   role: Role;
   customerId: string | null;

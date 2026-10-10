@@ -7,7 +7,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
-import type { Connection, FilterQuery } from 'mongoose';
+import { ClientSession, Connection, FilterQuery, Types } from 'mongoose';
 import { LeadStage, PIPELINE_LEAD_STAGES } from '../common/constants/enums';
 import type { AuthUser } from '../common/decorators/current-user.decorator';
 import type { SoftDeleteModel } from '../common/plugins/soft-delete.plugin';
@@ -15,6 +15,7 @@ import { parseDateOnly } from '../common/utils/date.util';
 import { round2 } from '../common/utils/money.util';
 import { idOf } from '../common/utils/object-id.util';
 import { generateTemporaryPassword } from '../common/utils/password.util';
+import { normalizePhone } from '../common/utils/phone.util';
 import { containsAny, escapeRegex } from '../common/utils/regex.util';
 import type { EnvironmentVariables } from '../config/env.validation';
 import { Customer } from '../customers/schemas/customer.schema';
@@ -22,11 +23,15 @@ import { ProjectResponse, toProjectResponse } from '../projects/project.mapper';
 import { Project, ProjectDocument } from '../projects/schemas/project.schema';
 import { StaffService } from '../staff/staff.service';
 import { UsersService } from '../users/users.service';
+import type { WhatsappStatus } from '../whatsapp/schemas/whatsapp-message.schema';
+import { WhatsappService } from '../whatsapp/whatsapp.service';
+import { WorkLogsService } from '../work-logs/work-logs.service';
 import {
   ConvertLeadDto,
   CreateLeadDto,
   LeadClientAccessDto,
   ListLeadsQueryDto,
+  NewClientDto,
   UpdateLeadDto,
 } from './dto/lead.dto';
 import {
@@ -36,6 +41,51 @@ import {
   toLeadResponse,
 } from './lead.mapper';
 import { Lead } from './schemas/lead.schema';
+
+type AccessState = Pick<Lead, 'visibleToClient' | 'showValueToClient'> & {
+  customerId: string | null;
+};
+
+type AccessRequest = Pick<
+  LeadClientAccessDto,
+  'customerId' | 'newClient' | 'visibleToClient' | 'showValueToClient' | 'sendWhatsapp'
+>;
+
+interface LoginOutcome {
+  created: boolean;
+  email: string | null;
+  temporaryPassword: string | null;
+}
+
+interface AccessOutcome {
+  /** The request carried access fields (customerId / newClient / visibility flags). */
+  changed: boolean;
+  state: AccessState;
+  /** The linked customer after the save. */
+  customer: Customer | null;
+  createdCustomer: boolean;
+  login: LoginOutcome | null;
+  sendWhatsapp: boolean;
+}
+
+/** Lead create/update response: the lead plus what happened to the client account. */
+export type LeadSaveResponse = LeadDetailResponse & {
+  /** A portal login was created; the password is shown outside production only. */
+  invite?: { phone: string | null; email: string | null; temporaryPassword?: string };
+  /** The queued WhatsApp message (null if it could not be queued). */
+  whatsapp?: { id: string; status: WhatsappStatus } | null;
+};
+
+/** Separates the access fields (not stored on the lead as-is) from the lead's own fields. */
+function splitAccess<T extends AccessRequest>(dto: T) {
+  const { customerId, newClient, visibleToClient, showValueToClient, sendWhatsapp, ...rest } = dto;
+  return {
+    request: { customerId, newClient, visibleToClient, showValueToClient, sendWhatsapp },
+    rest,
+  };
+}
+
+const QUOTE_REQUIRED = 'Set the quote (PRO and PREMIUM prices) before moving to PROPOSAL';
 
 export interface LeadStats {
   total: number;
@@ -50,7 +100,7 @@ export interface LeadStats {
 
 export interface ConvertLeadResult extends ProjectResponse {
   /** Present when a CUSTOMER login was created during conversion. */
-  invite?: { email: string; temporaryPassword?: string };
+  invite?: { phone: string | null; email: string | null; temporaryPassword?: string };
 }
 
 @Injectable()
@@ -64,6 +114,8 @@ export class LeadsService {
     @InjectModel(Customer.name) private readonly customerModel: SoftDeleteModel<Customer>,
     private readonly staff: StaffService,
     private readonly users: UsersService,
+    private readonly workLogs: WorkLogsService,
+    private readonly whatsapp: WhatsappService,
     private readonly config: ConfigService<EnvironmentVariables, true>,
   ) {}
 
@@ -91,118 +143,259 @@ export class LeadsService {
     return toLeadDetailResponse(lead, names);
   }
 
-  async create(dto: CreateLeadDto, actor: AuthUser): Promise<LeadDetailResponse> {
+  async create(dto: CreateLeadDto, actor: AuthUser): Promise<LeadSaveResponse> {
     const stage = dto.stage ?? 'LEAD';
     if (stage === 'WON') {
       throw new BadRequestException('A lead cannot be created as WON; use POST /leads/:id/convert');
     }
+    if (stage === 'PROPOSAL' && !dto.quote) {
+      throw new BadRequestException(QUOTE_REQUIRED);
+    }
     await this.staff.assertExist([dto.ownerId], undefined, 'ownerId');
-    const access = await this.resolveClientAccess(null, dto);
+    const { request, rest } = splitAccess(dto);
+    const { expectedClose, ...fields } = rest;
+    const id = new Types.ObjectId();
     const now = new Date();
-    const lead = await this.leadModel.create({
-      ...dto,
-      ...access,
-      stage,
-      expectedClose: dto.expectedClose ? parseDateOnly(dto.expectedClose) : null,
-      stageUpdatedAt: now,
-      stageHistory: [{ from: null, to: stage, by: actor.id, at: now }],
+    const outcome = await this.inTransaction(async (session) => {
+      const access = await this.resolveClientAccess(null, request, dto.company, session);
+      await this.leadModel.create(
+        [
+          {
+            _id: id,
+            ...fields,
+            ...access.state,
+            stage,
+            expectedClose: expectedClose ? parseDateOnly(expectedClose) : null,
+            stageUpdatedAt: now,
+            stageHistory: [{ from: null, to: stage, by: actor.id, at: now }],
+          },
+        ],
+        { session },
+      );
+      return access;
     });
-    if (access.customerId) this.logAccess(lead.id as string, access, actor);
-    return this.get(lead.id as string);
+    return this.afterSave(id.toHexString(), dto.title, outcome, actor);
   }
 
-  async update(id: string, dto: UpdateLeadDto, actor: AuthUser): Promise<LeadDetailResponse> {
-    const lead = await this.leadModel.findById(id);
-    if (!lead) throw new NotFoundException('Lead not found');
-    if (lead.projectId && dto.value !== undefined && round2(dto.value) !== lead.value) {
-      throw new ConflictException(
-        'Lead is converted; its value follows the project contract value',
-      );
+  /** Field edits and/or client access (see resolveClientAccess), in one transaction. */
+  async update(id: string, dto: UpdateLeadDto, actor: AuthUser): Promise<LeadSaveResponse> {
+    // PartialType makes every field skip validation when null; a quote cannot be cleared.
+    if ((dto.quote as unknown) === null) {
+      throw new BadRequestException('quote must have PRO and PREMIUM prices greater than 0');
     }
     if (dto.ownerId) await this.staff.assertExist([dto.ownerId], undefined, 'ownerId');
-    const { expectedClose, customerId, visibleToClient, showValueToClient, ...rest } = dto;
-    const accessChange = { customerId, visibleToClient, showValueToClient };
-    const access = this.hasAccessChange(accessChange)
-      ? await this.resolveClientAccess(lead, accessChange)
-      : null;
-    // Aliased DTO fields are always present (possibly undefined); never let them unset data.
-    lead.set(Object.fromEntries(Object.entries(rest).filter(([, v]) => v !== undefined)));
-    if (expectedClose !== undefined) {
-      lead.expectedClose = expectedClose ? parseDateOnly(expectedClose) : null;
-    }
-    if (access) lead.set(access);
-    await lead.save();
-    if (access) this.logAccess(id, access, actor);
-    return this.get(id);
+    const { request, rest } = splitAccess(dto);
+    const { expectedClose, ...fields } = rest;
+    let title = '';
+    const outcome = await this.inTransaction(async (session) => {
+      const lead = await this.leadModel.findById(id).session(session);
+      if (!lead) throw new NotFoundException('Lead not found');
+      if (lead.projectId && dto.value !== undefined && round2(dto.value) !== lead.value) {
+        throw new ConflictException(
+          'Lead is converted; its value follows the project contract value',
+        );
+      }
+      // Aliased DTO fields are always present (possibly undefined); never let them unset data.
+      lead.set(Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined)));
+      if (expectedClose !== undefined) {
+        lead.expectedClose = expectedClose ? parseDateOnly(expectedClose) : null;
+      }
+      const access = await this.resolveClientAccess(lead, request, lead.company, session);
+      if (access.changed) lead.set(access.state);
+      await lead.save({ session });
+      title = lead.title;
+      return access;
+    });
+    return this.afterSave(id, title, outcome, actor);
   }
 
-  /** Link a lead to a customer account and control what that customer sees in the portal. */
-  async setClientAccess(
+  /** Same rules as the access fields of PATCH /leads/:id. */
+  setClientAccess(
     id: string,
     dto: LeadClientAccessDto,
     actor: AuthUser,
-  ): Promise<LeadDetailResponse> {
-    const lead = await this.leadModel.findById(id);
-    if (!lead) throw new NotFoundException('Lead not found');
-    const access = await this.resolveClientAccess(lead, dto);
-    lead.set(access);
-    await lead.save();
-    this.logAccess(id, access, actor);
-    return this.get(id);
+  ): Promise<LeadSaveResponse> {
+    return this.update(id, dto, actor);
   }
 
-  private hasAccessChange(dto: LeadClientAccessDto): boolean {
-    return (
-      dto.customerId !== undefined ||
-      dto.visibleToClient !== undefined ||
-      dto.showValueToClient !== undefined
-    );
+  private async inTransaction<T>(fn: (session: ClientSession) => Promise<T>): Promise<T> {
+    const session = await this.connection.startSession();
+    let result!: T;
+    try {
+      // Callbacks must be retry-safe: withTransaction re-runs them on transient errors.
+      await session.withTransaction(async () => {
+        result = await fn(session);
+      });
+    } finally {
+      await session.endSession();
+    }
+    return result;
   }
 
   /**
-   * Final portal-access state after applying `dto` (omitted fields keep their current value):
-   * - visibleToClient requires a customerId (400)
-   * - customerId must reference a live customer (400)
-   * - clearing customerId resets both flags
+   * Final portal-access state for a create/update (omitted fields keep their current value):
+   * - customerId links an existing customer (400 if unknown); customerId and newClient together → 400
+   * - newClient reuses the live customer with that phone, or creates one (company = the lead's)
+   * - neither (customerId: null) unlinks and forces both flags off
+   * - showValueToClient: true requires visibleToClient (400); hiding the lead also hides the value
    * - a converted lead stays linked to its project's customer (409 on change)
+   * - newClient and sendWhatsapp make sure the customer has a portal login (created if missing)
+   * - sendWhatsapp requires a linked customer with a phone (400)
    */
   private async resolveClientAccess(
     current: Pick<
       Lead,
       'customerId' | 'visibleToClient' | 'showValueToClient' | 'projectId'
     > | null,
-    dto: LeadClientAccessDto,
-  ): Promise<{ customerId: string | null; visibleToClient: boolean; showValueToClient: boolean }> {
+    req: AccessRequest,
+    company: string,
+    session: ClientSession,
+  ): Promise<AccessOutcome> {
+    const newClient = req.newClient ?? null;
+    if (newClient && req.customerId) {
+      throw new BadRequestException('Send either customerId or newClient, not both');
+    }
+    const changed =
+      req.customerId !== undefined ||
+      !!newClient ||
+      req.visibleToClient !== undefined ||
+      req.showValueToClient !== undefined;
     const currentCustomer = idOf(current?.customerId ?? null);
-    const customerId = dto.customerId === undefined ? currentCustomer : dto.customerId;
+
+    let customer: Customer | null = null;
+    let createdCustomer = false;
+    if (newClient) {
+      ({ customer, created: createdCustomer } = await this.findOrCreateClient(
+        newClient,
+        company,
+        session,
+      ));
+    } else {
+      const customerId = req.customerId === undefined ? currentCustomer : req.customerId;
+      if (customerId) {
+        customer = await this.customerModel.findById(customerId).session(session).lean();
+        if (!customer) throw new BadRequestException('customerId does not reference a customer');
+      }
+    }
+    const customerId = idOf(customer?._id ?? null);
 
     if (current?.projectId && customerId !== currentCustomer) {
       throw new ConflictException(
         "Lead is converted; its client account follows the project's customer",
       );
     }
-    if (!customerId) {
-      if (dto.visibleToClient) {
-        throw new BadRequestException('visibleToClient requires a customerId');
+    let state: AccessState = { customerId: null, visibleToClient: false, showValueToClient: false };
+    if (customerId) {
+      const visible = req.visibleToClient ?? current?.visibleToClient ?? false;
+      if (req.showValueToClient && !visible) {
+        throw new BadRequestException('showValueToClient requires visibleToClient');
       }
-      return { customerId: null, visibleToClient: false, showValueToClient: false };
+      state = {
+        customerId,
+        visibleToClient: visible,
+        showValueToClient:
+          visible && (req.showValueToClient ?? current?.showValueToClient ?? false),
+      };
     }
-    if (customerId !== currentCustomer) {
-      const exists = await this.customerModel.exists({ _id: customerId });
-      if (!exists) throw new BadRequestException('customerId does not reference a customer');
+
+    const sendWhatsapp = !!req.sendWhatsapp;
+    if (sendWhatsapp && !customer) {
+      throw new BadRequestException('sendWhatsapp requires a client (customerId or newClient)');
     }
-    return {
-      customerId,
-      visibleToClient: dto.visibleToClient ?? current?.visibleToClient ?? false,
-      showValueToClient: dto.showValueToClient ?? current?.showValueToClient ?? false,
-    };
+    if (sendWhatsapp && !customer!.phone) {
+      throw new BadRequestException('sendWhatsapp: this client has no phone number');
+    }
+    const login =
+      customer && (newClient || sendWhatsapp) ? await this.ensureLogin(customer, session) : null;
+    return { changed, state, customer, createdCustomer, login, sendWhatsapp };
   }
 
-  private logAccess(
+  /** Dedupe by normalised phone among live customers; otherwise create one. */
+  private async findOrCreateClient(
+    client: NewClientDto,
+    company: string,
+    session: ClientSession,
+  ): Promise<{ customer: Customer; created: boolean }> {
+    const existing = await this.customerModel
+      .findOne({ phone: client.phone })
+      .session(session)
+      .lean();
+    if (existing) return { customer: existing, created: false };
+    const [created] = await this.customerModel.create(
+      [
+        {
+          name: company || client.name,
+          contactName: client.name,
+          phone: client.phone,
+          email: client.email ?? '',
+        },
+      ],
+      { session },
+    );
+    return { customer: created.toObject(), created: true };
+  }
+
+  /**
+   * Gives the customer a CUSTOMER login (phone sign-in; email too when it's free) unless it
+   * already has one, or has neither. Returns the temporary password of a new login.
+   */
+  private async ensureLogin(customer: Customer, session: ClientSession): Promise<LoginOutcome> {
+    const customerId = idOf(customer._id)!;
+    if (await this.users.customerHasLogin(customerId, session)) {
+      return { created: false, email: null, temporaryPassword: null };
+    }
+    const email =
+      customer.email && !(await this.users.emailExists(customer.email, session))
+        ? customer.email
+        : null;
+    // Nothing to sign in with: don't create an unusable account.
+    if (!customer.phone && !email) return { created: false, email: null, temporaryPassword: null };
+    const temporaryPassword = generateTemporaryPassword();
+    await this.users.createCustomerLogin(
+      { name: customer.contactName || customer.name, email, customerId },
+      temporaryPassword,
+      session,
+    );
+    return { created: true, email, temporaryPassword };
+  }
+
+  /** Post-commit side effects (log, WhatsApp) and the response. */
+  private async afterSave(
     id: string,
-    access: { customerId: string | null; visibleToClient: boolean; showValueToClient: boolean },
+    title: string,
+    outcome: AccessOutcome,
     actor: AuthUser,
-  ): void {
+  ): Promise<LeadSaveResponse> {
+    const { customer, login } = outcome;
+    if (outcome.changed) this.logAccess(id, outcome.state, actor);
+    if (outcome.createdCustomer) {
+      this.logger.log(`Lead ${id}: created customer ${idOf(customer!._id)} by ${actor.email}`);
+    }
+    const response: LeadSaveResponse = await this.get(id);
+    if (customer && login?.created) {
+      const isProduction = this.config.get('NODE_ENV', { infer: true }) === 'production';
+      response.invite = {
+        phone: customer.phone ?? null,
+        email: login.email,
+        ...(isProduction ? {} : { temporaryPassword: login.temporaryPassword! }),
+      };
+    }
+    if (outcome.sendWhatsapp && customer) {
+      const message = await this.whatsapp.enqueueClientInvite({
+        leadId: id,
+        customerId: idOf(customer._id)!,
+        phone: customer.phone!,
+        name: customer.contactName || customer.name,
+        title,
+        newAccount: !!login?.created,
+        temporaryPassword: login?.temporaryPassword ?? null,
+      });
+      response.whatsapp = message ? { id: message.id, status: message.status } : null;
+    }
+    return response;
+  }
+
+  private logAccess(id: string, access: AccessState, actor: AuthUser): void {
     this.logger.log(
       `Lead ${id} client access by ${actor.email}: customer=${access.customerId ?? 'none'} ` +
         `visible=${access.visibleToClient} showValue=${access.showValueToClient}`,
@@ -219,12 +412,15 @@ export class LeadsService {
         'Leads cannot be moved to WON directly; use POST /leads/:id/convert',
       );
     }
-    const lead = await this.leadModel.findById(id).select('stage projectId').lean();
+    const lead = await this.leadModel.findById(id).select('stage projectId quote').lean();
     if (!lead) throw new NotFoundException('Lead not found');
     if (lead.projectId || lead.stage === 'WON') {
       throw new ConflictException('Lead has been converted to a project and is locked');
     }
     if (lead.stage === stage) return this.get(id);
+    if (stage === 'PROPOSAL' && !lead.quote) {
+      throw new BadRequestException(QUOTE_REQUIRED);
+    }
 
     const now = new Date();
     // Conditional update guards against a concurrent conversion or stage change.
@@ -246,11 +442,20 @@ export class LeadsService {
     if (lead.projectId) {
       throw new ConflictException('Converted leads cannot be deleted');
     }
-    const deleted = await this.leadModel.findOneAndUpdate(
-      { _id: id, projectId: { $exists: false } },
-      { $set: { deletedAt: new Date() } },
-    );
-    if (!deleted) throw new ConflictException('Converted leads cannot be deleted');
+    const session = await this.connection.startSession();
+    try {
+      await session.withTransaction(async () => {
+        const deleted = await this.leadModel.findOneAndUpdate(
+          { _id: id, projectId: { $exists: false } },
+          { $set: { deletedAt: new Date() } },
+          { session },
+        );
+        if (!deleted) throw new ConflictException('Converted leads cannot be deleted');
+        await this.workLogs.removeFor({ leadId: id }, session);
+      });
+    } finally {
+      await session.endSession();
+    }
     return { id, deleted: true };
   }
 
@@ -310,7 +515,12 @@ export class LeadsService {
     const session = await this.connection.startSession();
     let project!: ProjectDocument;
     let clientName = '';
-    let invite: { email: string; password: string; customerName: string } | null = null;
+    let invite: {
+      phone: string | null;
+      email: string | null;
+      password: string;
+      customerName: string;
+    } | null = null;
 
     try {
       await session.withTransaction(async () => {
@@ -326,39 +536,52 @@ export class LeadsService {
         }
         await this.staff.assertExist(dto.staffIds ?? [], session);
 
-        let customerId: string;
-        if (dto.customerId === 'NEW') {
-          const [customer] = await this.customerModel.create(
-            [
-              {
-                name: lead.company,
-                contactName: lead.contactName,
-                email: lead.email,
-                phone: lead.phone,
-              },
-            ],
-            { session },
+        // A lead already linked to a client converts for that client (same portal login).
+        const linked = idOf(lead.customerId ?? null);
+        if (linked && dto.customerId && dto.customerId !== linked) {
+          throw new ConflictException(
+            `Lead is linked to customer ${linked}; convert it for that customer or change the link first`,
           );
-          customerId = customer.id as string;
-          clientName = customer.name;
-          if (lead.email && !(await this.users.emailExists(lead.email, session))) {
-            const password = generateTemporaryPassword();
-            await this.users.createCustomerLogin(
-              { name: lead.contactName || lead.company, email: lead.email, customerId },
-              password,
-              session,
-            );
-            invite = { email: lead.email, password, customerName: customer.name };
+        }
+        const requested = linked ?? dto.customerId;
+        if (!requested) {
+          throw new BadRequestException('customerId is required (a customer id or "NEW")');
+        }
+        let customer: Customer | null;
+        if (requested === 'NEW') {
+          // Reuse the live customer that already has this phone, like newClient does.
+          const phone = normalizePhone(lead.phone);
+          customer = phone
+            ? await this.customerModel.findOne({ phone }).session(session).lean()
+            : null;
+          customer ??= (
+            await this.customerModel.create(
+              [
+                {
+                  name: lead.company,
+                  contactName: lead.contactName,
+                  email: lead.email,
+                  phone,
+                },
+              ],
+              { session },
+            )
+          )[0].toObject();
+          const login = await this.ensureLogin(customer, session);
+          if (login.created) {
+            invite = {
+              phone: customer.phone ?? null,
+              email: login.email,
+              password: login.temporaryPassword!,
+              customerName: customer.name,
+            };
           }
         } else {
-          const customer = await this.customerModel
-            .findById(dto.customerId)
-            .session(session)
-            .lean();
+          customer = await this.customerModel.findById(requested).session(session).lean();
           if (!customer) throw new BadRequestException('customerId does not reference a customer');
-          customerId = dto.customerId;
-          clientName = customer.name;
         }
+        const customerId = idOf(customer._id)!;
+        clientName = customer.name;
 
         const now = new Date();
         [project] = await this.projectModel.create(
@@ -373,6 +596,7 @@ export class LeadsService {
               startDate,
               endDate,
               contractValue: dto.contractValue,
+              plan: dto.plan,
               dev: { requirement: 0, ui: 0, frontend: 0, backend: 0 },
               team: dto.staffIds ?? [],
               clientApproved: false,
@@ -400,13 +624,20 @@ export class LeadsService {
 
     // Side effects only after a successful commit.
     this.logger.log(
-      `Lead ${id} converted to project ${project.id} by ${actor.email} (contract ${dto.contractValue})`,
+      `Lead ${id} converted to project ${project.id} by ${actor.email} ` +
+        `(plan ${dto.plan}, contract ${dto.contractValue})`,
     );
     const result: ConvertLeadResult = toProjectResponse(project.toObject(), clientName);
-    const sent = invite as { email: string; password: string; customerName: string } | null;
+    const sent = invite as {
+      phone: string | null;
+      email: string | null;
+      password: string;
+      customerName: string;
+    } | null;
     if (sent) {
-      this.users.sendInvite(sent.email, sent.customerName);
+      if (sent.email) this.users.sendInvite(sent.email, sent.customerName);
       result.invite = {
+        phone: sent.phone,
         email: sent.email,
         ...(isProduction ? {} : { temporaryPassword: sent.password }),
       };

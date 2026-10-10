@@ -1,5 +1,5 @@
 import { Types } from 'mongoose';
-import type { ProjectStage } from '../../src/common/constants/enums';
+import type { ProjectPlan, ProjectStage } from '../../src/common/constants/enums';
 import { Expense } from '../../src/expenses/schemas/expense.schema';
 import { Lead } from '../../src/leads/schemas/lead.schema';
 import { Payment } from '../../src/payments/schemas/payment.schema';
@@ -18,6 +18,7 @@ export async function makeProject(
     name?: string;
     stage?: ProjectStage;
     contractValue?: number;
+    plan?: ProjectPlan;
     team?: string[];
     clientApproved?: boolean;
   },
@@ -47,6 +48,7 @@ export async function makeProject(
     startDate: utcDate('2026-01-01'),
     endDate: utcDate('2026-12-31'),
     contractValue: opts.contractValue ?? 100000,
+    plan: opts.plan,
     dev: { requirement: 100, ui: 50, frontend: 20, backend: 30 },
     team: opts.team ?? [],
     clientApproved: opts.clientApproved ?? false,

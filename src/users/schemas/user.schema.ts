@@ -9,8 +9,9 @@ export class User extends BaseEntity {
   @Prop({ required: true, trim: true })
   name: string;
 
-  @Prop({ required: true, unique: true, lowercase: true, trim: true })
-  email: string;
+  /** Required for ADMIN users. Optional for CUSTOMER users, who sign in with their customer's phone. */
+  @Prop({ type: String, default: null, lowercase: true, trim: true })
+  email?: string | null;
 
   @Prop({ required: true, select: false })
   passwordHash: string;
@@ -31,4 +32,8 @@ export class User extends BaseEntity {
 export type UserDocument = HydratedDocument<User>;
 export const UserSchema = SchemaFactory.createForClass(User);
 UserSchema.index({ role: 1, customerId: 1 });
+UserSchema.index(
+  { email: 1 },
+  { unique: true, name: 'email_unique', partialFilterExpression: { email: { $type: 'string' } } },
+);
 applyCommonPlugins(UserSchema);
